@@ -90,9 +90,9 @@ CREATE TABLE IF NOT EXISTS trade_analysis (
     analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
     trade_id TEXT NOT NULL UNIQUE REFERENCES trades(trade_id),
     summary TEXT,
-    trade_quality TEXT CHECK(trade_quality IN ('valid', 'invalid', 'mixed')),
-    regime_quality TEXT CHECK(regime_quality IN ('favorable', 'unfavorable', 'mixed')),
-    execution_quality TEXT CHECK(execution_quality IN ('good', 'bad', 'unknown')),
+    trade_quality TEXT,
+    regime_quality TEXT,
+    execution_quality TEXT,
     lessons TEXT,  -- JSON array
     confidence REAL,
     created_at TEXT DEFAULT (datetime('now'))

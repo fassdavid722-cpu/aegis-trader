@@ -1,12 +1,14 @@
-"""Groq-Powered Trader Brain.
+"""Groq-Powered Trader Brain v2 — The Hunter.
 
-The LLM IS the trader — not just a reviewer. It looks at live market data
-and decides whether to trade, what direction, entry/exit levels, and mode
-(scalp vs swing). Learns from its own past trades via in-context examples.
+This is not an analyst. This is a trader. A hungry scalper who:
+- Takes 5-10+ trades per session (not 0)
+- Hunts momentum bursts, volume surges, level reactions
+- Sizes risk appropriately but ACTS when edge appears
+- Learns from every trade — gets more aggressive as it finds what works
+- Knows that sitting out all session = not eating
 
-Architecture:
-  Market Data (candles, regime, funding) → Groq → Trade Decision
-  Past Trade Results → In-context learning → Better future decisions
+The LLM receives pre-processed market intelligence (not raw candles),
+so it can make fast, decision-ready calls like a real trader.
 """
 from __future__ import annotations
 
@@ -23,20 +25,25 @@ try:
 except ImportError:
     HAS_GROQ = False
 
+from analyst.market_intelligence import build_intelligence, MarketIntelligence
+
 DB_PATH = Path(__file__).parent.parent / "data" / "journal.db"
 
 
 class GroqTrader:
-    """AI trader that makes real trading decisions using Groq LLM."""
+    """AI trader with a scalper's hunger and a risk manager's discipline."""
 
     MODEL = "llama-3.3-70b-versatile"
 
-    # Session windows for scalping (wider than before)
-    SCALP_SESSIONS = {
-        "LONDON": (7, 11),    # 07:00-11:00 UTC
-        "NY": (13, 17),       # 13:00-17:00 UTC
-        "OVERLAP": (13, 15),  # Highest volume
+    # Wider session windows for scalping
+    SESSIONS = {
+        "LONDON": (7, 11),     # 07:00-11:00 UTC
+        "NY": (13, 17),        # 13:00-17:00 UTC
     }
+
+    # Confidence threshold drops as hunger increases
+    BASE_CONFIDENCE = 55  # Start lower — take more trades
+    HUNGER_CONFIDENCE_DROP = 10  # After 30 min no trades, threshold drops by 10
 
     def __init__(self) -> None:
         self.api_key = os.getenv("LLM_API_KEY", "")
@@ -57,23 +64,26 @@ class GroqTrader:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
-    def get_session(self) -> tuple[str, bool]:
-        """Check if we're in a scalping session."""
-        hour = datetime.now(timezone.utc).hour
-        for name, (start, end) in self.SCALP_SESSIONS.items():
-            if start <= hour < end:
-                return name, True
-        return "OFF_HOURS", False
+    def get_session(self) -> tuple[str, bool, float]:
+        """Returns (session_name, is_active, progress 0-1)."""
+        hour = datetime.now(timezone.utc)
+        h = hour.hour
+        m = hour.minute
+
+        for name, (start, end) in self.SESSIONS.items():
+            if start <= h < end:
+                progress = (h - start + m / 60) / (end - start)
+                return name, True, progress
+        return "OFF_HOURS", False, 0.0
 
     def _load_recent_trades(self, limit: int = 15) -> list[dict]:
-        """Load recent closed trades for in-context learning."""
+        """Load recent closed trades for learning."""
         conn = self._get_conn()
         rows = conn.execute("""
             SELECT t.symbol, t.direction, t.result, t.actual_r,
                    t.market_regime, t.confidence_score, t.exit_reason,
                    t.opened_at, t.closed_at, t.entry_price, t.exit_price,
-                   t.stop_loss, t.take_profit,
-                   s.metadata
+                   t.stop_loss, t.take_profit, s.metadata
             FROM trades t
             LEFT JOIN signals s ON t.signal_id = s.signal_id
             WHERE t.status = 'CLOSED'
@@ -83,168 +93,220 @@ class GroqTrader:
         conn.close()
         return [dict(r) for r in rows]
 
-    def _load_trade_stats(self) -> dict:
+    def _load_stats(self) -> dict:
         """Load aggregate trading stats."""
         conn = self._get_conn()
         total = conn.execute("SELECT count(*) FROM trades WHERE status='CLOSED'").fetchone()[0]
         wins = conn.execute("SELECT count(*) FROM trades WHERE status='CLOSED' AND result='WIN'").fetchone()[0]
-        losses = total - wins
         avg_r = conn.execute("SELECT avg(actual_r) FROM trades WHERE status='CLOSED'").fetchone()[0] or 0
         total_r = conn.execute("SELECT sum(actual_r) FROM trades WHERE status='CLOSED'").fetchone()[0] or 0
+
+        # Today's trades
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_trades = conn.execute(
+            "SELECT count(*) FROM trades WHERE date(opened_at)=? AND status IN ('OPEN','PARTIAL','CLOSED')",
+            (today,)
+        ).fetchone()[0]
+
+        # Open positions count
+        open_count = conn.execute(
+            "SELECT count(*) FROM trades WHERE status IN ('OPEN','PARTIAL')"
+        ).fetchone()[0]
+
+        # Mode-specific stats
+        scalp_wins = conn.execute("""
+            SELECT count(*) FROM trades WHERE status='CLOSED' AND result='WIN'
+            AND market_regime='SCALP'
+        """).fetchone()[0]
+        scalp_total = conn.execute("""
+            SELECT count(*) FROM trades WHERE status='CLOSED' AND market_regime='SCALP'
+        """).fetchone()[0]
+
         conn.close()
+
         return {
             "total": total,
             "wins": wins,
-            "losses": losses,
+            "losses": total - wins,
             "win_rate": (wins / total * 100) if total > 0 else 0,
             "avg_r": avg_r,
             "total_r": total_r,
+            "today_trades": today_trades,
+            "open_positions": open_count,
+            "scalp_win_rate": (scalp_wins / scalp_total * 100) if scalp_total > 0 else 0,
+            "scalp_total": scalp_total,
         }
 
-    def _format_candles(self, candles: list[dict], max_bars: int = 40) -> str:
-        """Format candle data for the LLM prompt."""
-        if not candles:
-            return "No data"
-        recent = candles[-max_bars:]
-        lines = []
-        for c in recent:
-            t = c.get("timestamp", "")
-            if isinstance(t, str):
-                t = t[-8:-3]  # HH:MM
-            lines.append(
-                f"  {t} | O:{c['open']:.4f} H:{c['high']:.4f} "
-                f"L:{c['low']:.4f} C:{c['close']:.4f} V:{c.get('volume',0):.0f}"
-            )
-        return "\n".join(lines)
+    def _load_lessons(self) -> list[str]:
+        """Load recent lessons from trade analysis."""
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT lessons FROM trade_analysis
+            ORDER BY created_at DESC LIMIT 5
+        """).fetchall()
+        conn.close()
+        lessons = []
+        for r in rows:
+            try:
+                items = json.loads(r[0] or "[]")
+                for item in items:
+                    if isinstance(item, str) and len(item) < 150:
+                        lessons.append(item)
+            except Exception:
+                pass
+        return lessons[:8]  # Last 8 lessons
 
     def _format_recent_trades(self, trades: list[dict]) -> str:
-        """Format recent trade history for learning context."""
+        """Format trade history for learning context."""
         if not trades:
-            return "No trade history yet — this is your first session."
+            return "No trades yet — this is your first session. Time to hunt."
         lines = []
-        for t in trades[:10]:
+        for t in trades[:8]:
             result = t.get("result", "?")
             r = t.get("actual_r", 0) or 0
             symbol = t.get("symbol", "?")
             direction = t.get("direction", "?")
-            regime = t.get("market_regime", "?")
             exit_reason = t.get("exit_reason", "?")
             confidence = t.get("confidence_score", 0) or 0
-
-            # Load metadata for reasoning
             meta = {}
             try:
                 meta = json.loads(t.get("metadata", "{}") or "{}")
             except Exception:
                 pass
-            reasoning = meta.get("llm_reasoning", "")[:100]
-
+            mode = meta.get("mode", "?")
+            reasoning = meta.get("llm_reasoning", "")[:80]
             icon = "✅" if result == "WIN" else "❌"
             lines.append(
-                f"  {icon} {symbol} {direction} → {result} ({r:+.1f}R) "
-                f"[{regime}] conf={confidence:.0f}% exit={exit_reason} — {reasoning}"
+                f"  {icon} {symbol} {direction} ({mode}) → {result} {r:+.1f}R "
+                f"[{exit_reason}] conf={confidence:.0f}% — {reasoning}"
             )
         return "\n".join(lines)
 
-    def _build_trading_prompt(
+    def _format_lessons(self, lessons: list[str]) -> str:
+        """Format lessons for the prompt."""
+        if not lessons:
+            return "No lessons learned yet."
+        return "\n".join(f"  • {l}" for l in lessons)
+
+    def _build_hunger_context(self, stats: dict, session: str, session_progress: float) -> str:
+        """Build context about how hungry the trader should be."""
+        today = stats["today_trades"]
+        open_pos = stats["open_positions"]
+
+        if today == 0 and session_progress > 0.25:
+            return ("⚠️ HUNGER ALERT: You're 25%+ into the session with ZERO trades taken. "
+                    "A real scalper doesn't sit on their hands this long. "
+                    "If there's even a 55% edge, take it. Small wins compound. "
+                    "Stop waiting for the perfect setup — it rarely comes.")
+        elif today == 0:
+            return ("Session just started. Scan aggressively — look for momentum bursts "
+                    "and volume surges. First trade sets the tone.")
+        elif today < 3:
+            return (f"You've taken {today} trade(s) this session. "
+                    f"Good start but a scalper takes 5-10+. Keep hunting.")
+        elif today < 6:
+            return f"{today} trades today. You're in the zone — keep finding edges."
+        else:
+            return f"{today} trades today. You're active. Maintain discipline on risk."
+
+    def _build_prompt(
         self,
-        symbol: str,
-        candles_5m: list[dict],
-        candles_15m: list[dict],
+        intel: MarketIntelligence,
         funding_rate: Optional[float],
-        current_price: float,
-        session: str,
-        recent_trades: list[dict],
         stats: dict,
+        recent_trades: list[dict],
+        lessons: list[str],
+        session: str,
+        session_progress: float,
         open_positions: list[dict],
     ) -> str:
-        """Build the full trading decision prompt."""
+        """Build the hunter prompt."""
 
-        # Calculate some quick stats from candles
-        if candles_5m and len(candles_5m) >= 10:
-            last_10 = candles_5m[-10:]
-            highs = [c["high"] for c in last_10]
-            lows = [c["low"] for c in last_10]
-            range_high = max(highs)
-            range_low = min(lows)
-            current_range_pct = ((range_high - range_low) / range_low) * 100
-            avg_volume = sum(c.get("volume", 0) for c in last_10) / 10
-            last_volume = candles_5m[-1].get("volume", 0)
-            vol_surge = (last_volume / avg_volume) if avg_volume > 0 else 1.0
-        else:
-            range_high = range_low = current_price
-            current_range_pct = 0
-            vol_surge = 1.0
+        hunger = self._build_hunger_context(stats, session, session_progress)
 
-        # 15min trend context
-        if candles_15m and len(candles_15m) >= 5:
-            last_5 = candles_15m[-5:]
-            trend_closes = [c["close"] for c in last_5]
-            trending_up = trend_closes[-1] > trend_closes[0]
-            trend_text = f"{'↗ BULLISH' if trending_up else '↘ BEARISH'} (5-bar close: {trend_closes[0]:.2f} → {trend_closes[-1]:.2f})"
-        else:
-            trend_text = "Insufficient data"
+        open_pos_text = "None" if not open_positions else "\n".join(
+            f"  {p['symbol']} {p['direction']} @ {p.get('entry_price', p.get('entry', 0)):.4f} "
+            f"SL={p['stop_loss']:.4f} TP={p.get('take_profit', p.get('take_profit_2', 0)):.4f}"
+            for p in open_positions
+        )
 
-        open_pos_text = "None"
-        if open_positions:
-            open_pos_text = "\n".join(
-                f"  {p['symbol']} {p['direction']} @ {p['entry_price']} SL={p['stop_loss']} TP={p['take_profit']}"
-                for p in open_positions
-            )
+        funding_text = f"{funding_rate:.6f}" if funding_rate is not None else "N/A"
 
-        return f"""You are Aegis, an elite crypto scalper and intraday trader on Bitget futures.
-Your job: analyze live market data and decide whether to take a trade RIGHT NOW.
+        briefing = intel.to_briefing()
 
-TRADING STYLE:
-- PRIMARY: Scalping — quick 5-30 min holds, tight SL (0.2-0.4%), small TP (0.3-0.7%)
-- HYBRID: When you see a high-conviction setup (strong trend + zone + structure), take a swing trade with wider TP (1-3R)
-- You are a TRADER, not a signal bot. Think about market psychology, order flow, manipulation.
+        # ATR-based SL suggestion
+        atr_sl_scalp = intel.atr_5m * 1.2 if intel.atr_5m > 0 else intel.current_price * 0.003
+        atr_sl_swing = intel.atr_15m * 1.5 if intel.atr_15m > 0 else intel.current_price * 0.008
+        scalp_sl_pct = (atr_sl_scalp / intel.current_price) * 100
+        swing_sl_pct = (atr_sl_swing / intel.current_price) * 100
 
-CURRENT MARKET — {symbol}:
-- Price: {current_price:.4f}
-- Session: {session}
-- Funding rate: {funding_rate:.6f}" if funding_rate is not None else "N/A"
-- 5min range (last 10 bars): {range_low:.4f} - {range_high:.4f} ({current_range_pct:.2f}%)
-- Volume surge: {vol_surge:.2f}x avg
-- 15min trend: {trend_text}
+        return f"""You are Aegis — a hungry, elite crypto scalper on Bitget futures.
 
-5-MINUTE CANDLES (most recent {min(len(candles_5m), 40)}):
-{self._format_candles(candles_5m, 40)}
+YOU ARE A TRADER, NOT AN ANALYST.
+- You make your living scalping. Sitting out all session = you don't eat.
+- You take trades with 55%+ edge. You don't wait for 90% setups — they don't exist.
+- You hunt momentum bursts, volume surges, level reactions, and structure breaks.
+- You manage risk on every trade but you ACT when edge appears.
+- Missing a good trade bothers you MORE than a small loss.
+- You scalp primarily (5-30 min holds). On rare high-conviction setups, you swing.
+- Every loss is a lesson. Every win confirms your read. You get sharper all session.
 
-15-MINUTE CANDLES (trend context, last 10):
-{self._format_candles(candles_15m, 10)}
+SCALPING PARAMETERS:
+- SL: {scalp_sl_pct:.3f}% ({atr_sl_scalp:.4f} — 1.2x ATR)
+- TP1: 0.3-0.7% (quick partial)
+- TP2: 0.5-1.0% (full exit)
+- Risk: 0.5-1.5% of account per trade
+- Max hold: 30 min (if price stalls, close and move on)
 
-YOUR PAST TRADES (learn from these):
+SWING PARAMETERS (only for high-conviction):
+- SL: {swing_sl_pct:.3f}% ({atr_sl_swing:.4f} — 1.5x 15min ATR)
+- TP1: 1.0-1.5R
+- TP2: 2.0-3.0R
+- Risk: 1.0-2.0% of account
+
+{briefing}
+
+FUNDING RATE: {funding_text}
+
+{hunger}
+
+YOUR TRACK RECORD:
+- Total: {stats['total']} trades | Win rate: {stats['win_rate']:.0f}% | Avg R: {stats['avg_r']:.2f} | Total R: {stats['total_r']:.2f}
+- Today: {stats['today_trades']} trades | Open: {stats['open_positions']}
+- Scalp win rate: {stats['scalp_win_rate']:.0f}% ({stats['scalp_total']} trades)
+
+RECENT TRADES:
 {self._format_recent_trades(recent_trades)}
 
-YOUR STATS:
-- Total trades: {stats['total']} | Win rate: {stats['win_rate']:.0f}% | Avg R: {stats['avg_r']:.2f} | Total R: {stats['total_r']:.2f}
+LESSONS YOU'VE LEARNED:
+{self._format_lessons(lessons)}
 
 OPEN POSITIONS:
 {open_pos_text}
 
-INSTRUCTIONS:
-1. Analyze the price action — look for: momentum shifts, support/resistance rejections, volume spikes, squeeze setups, BOS/CHOCH
-2. Consider your past trade results — what's working? What's not?
-3. Decide: TRADE or NO_TRADE
-4. If TRADE: pick mode (SCALP or SWING), set entry/SL/TP based on recent price structure
+YOUR DECISION:
+Look at the pre-processed signals above. If signal_strength >= 4, you should probably trade.
+If there's a pattern + volume + momentum alignment, that's your edge. Take it.
 
-Respond in EXACTLY this JSON format (no markdown, no code fences):
+Choose TRADE only if you can articulate: (1) what edge you see, (2) where your SL goes and why,
+(3) where price should go and why. If you can't answer all three, don't trade.
+
+Respond in EXACTLY this JSON (no markdown, no code fences):
 {{
   "decision": "TRADE" or "NO_TRADE",
   "mode": "SCALP" or "SWING",
-  "symbol": "{symbol}",
+  "symbol": "{intel.symbol}",
   "direction": "LONG" or "SHORT",
-  "entry": <float>,
-  "stop_loss": <float>,
-  "take_profit_1": <float>,
-  "take_profit_2": <float>,
-  "confidence": <int 0-100>,
+  "entry": {intel.current_price},
+  "stop_loss": <price>,
+  "take_profit_1": <price>,
+  "take_profit_2": <price>,
+  "confidence": <int 50-95>,
   "risk_percent": <float 0.3-2.0>,
-  "reasoning": "<2-3 sentences explaining your analysis>",
-  "what_you_see": "<brief description of the price action pattern>"
+  "reasoning": "<what edge you see, 2-3 sentences>",
+  "what_you_see": "<the specific price action pattern>",
+  "invalidation": "<what would prove you wrong>"
 }}"""
-
 
     def make_trading_decision(
         self,
@@ -252,38 +314,43 @@ Respond in EXACTLY this JSON format (no markdown, no code fences):
         candles_5m: list[dict],
         candles_15m: list[dict],
         funding_rate: Optional[float],
-        current_price: float,
         open_positions: list[dict] = None,
     ) -> Optional[dict[str, Any]]:
-        """Ask Groq to make a trading decision for this symbol."""
+        """Make a trading decision using market intelligence + Groq."""
         if not self.available:
-            print("[GroqTrader] Groq not available")
+            print(f"[GroqTrader] {symbol}: Groq unavailable")
             return None
 
-        session, is_active = self.get_session()
+        session, is_active, progress = self.get_session()
         if not is_active:
-            return None  # Don't trade outside sessions
+            return None
 
-        recent_trades = self._load_recent_trades(15)
-        stats = self._load_trade_stats()
-        if open_positions is None:
-            open_positions = []
+        # Already holding this symbol?
+        if open_positions and any(p.get("symbol") == symbol for p in open_positions):
+            return None
 
-        # Check if already holding this symbol
-        already_holding = any(p.get("symbol") == symbol for p in open_positions)
-        if already_holding:
-            return None  # Don't add to existing position
-
-        prompt = self._build_trading_prompt(
+        # Build market intelligence
+        intel = build_intelligence(
             symbol=symbol,
             candles_5m=candles_5m,
             candles_15m=candles_15m,
             funding_rate=funding_rate,
-            current_price=current_price,
             session=session,
-            recent_trades=recent_trades,
-            stats=stats,
-            open_positions=open_positions,
+            session_progress=progress,
+        )
+
+        # Quick filter: if signal strength is 0 and volume is dry, skip the LLM call
+        if intel.signal_strength == 0 and intel.volume_status == "DRY":
+            print(f"[GroqTrader] {symbol}: No signals + dry volume — skip LLM call")
+            return None
+
+        stats = self._load_stats()
+        recent = self._load_recent_trades(15)
+        lessons = self._load_lessons()
+
+        prompt = self._build_prompt(
+            intel, funding_rate, stats, recent, lessons,
+            session, progress, open_positions or [],
         )
 
         try:
@@ -293,21 +360,21 @@ Respond in EXACTLY this JSON format (no markdown, no code fences):
                     {
                         "role": "system",
                         "content": (
-                            "You are Aegis, an elite crypto scalper. You make precise, "
-                            "data-driven trading decisions. You are disciplined: you skip "
-                            "bad setups without hesitation. You learn from your mistakes. "
-                            "Always respond with valid JSON only — no markdown, no commentary."
+                            "You are Aegis, an elite crypto scalper. You are HUNGRY and DECISIVE. "
+                            "You take 5-10+ trades per session. You don't sit on your hands. "
+                            "You manage risk but you ACT when edge appears. "
+                            "You learn from every trade and get sharper all session. "
+                            "ALWAYS respond with valid JSON only — no markdown, no commentary."
                         ),
                     },
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.4,
+                temperature=0.5,  # Slightly higher for more creative trade-finding
                 max_tokens=600,
                 timeout=30,
             )
 
             raw = response.choices[0].message.content.strip()
-            # Clean markdown fences
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
             if raw.endswith("```"):
@@ -316,28 +383,41 @@ Respond in EXACTLY this JSON format (no markdown, no code fences):
 
             decision = json.loads(raw)
 
-            # Validate required fields
             if decision.get("decision") == "NO_TRADE":
-                print(f"[GroqTrader] {symbol}: NO_TRADE — {decision.get('reasoning', '')[:80]}")
+                reason = decision.get("reasoning", "no reason given")[:80]
+                print(f"[GroqTrader] {symbol}: NO_TRADE — {reason}")
                 return None
 
-            # Validate trade decision has required fields
+            # Validate
             required = ["direction", "entry", "stop_loss", "take_profit_1", "take_profit_2"]
             for field in required:
                 if field not in decision or decision[field] is None:
                     print(f"[GroqTrader] {symbol}: missing {field}")
                     return None
 
-            # Sanitize numeric fields
+            # Sanitize
             for field in ["entry", "stop_loss", "take_profit_1", "take_profit_2"]:
                 decision[field] = float(decision[field])
-            decision["confidence"] = int(decision.get("confidence", 70))
+            decision["confidence"] = int(decision.get("confidence", 65))
             decision["risk_percent"] = float(decision.get("risk_percent", 1.0))
             decision["symbol"] = symbol
             decision["session"] = session
 
-            print(f"[GroqTrader] {symbol}: {decision['direction']} {decision.get('mode','SCALP')} "
-                  f"@ {decision['entry']:.4f} conf={decision['confidence']}% — {decision.get('reasoning','')[:60]}")
+            # Validate SL makes sense
+            sl_dist = abs(decision["entry"] - decision["stop_loss"])
+            sl_pct = (sl_dist / decision["entry"]) * 100
+            if sl_pct > 2.0:
+                print(f"[GroqTrader] {symbol}: SL too wide ({sl_pct:.2f}%) — adjusting")
+                if decision["direction"] == "LONG":
+                    decision["stop_loss"] = decision["entry"] * 0.995  # 0.5% SL
+                else:
+                    decision["stop_loss"] = decision["entry"] * 1.005
+
+            mode = decision.get("mode", "SCALP")
+            emoji = "🟢" if decision["direction"] == "LONG" else "🔴"
+            print(f"[GroqTrader] {symbol}: {emoji} {decision['direction']} {mode} "
+                  f"@ {decision['entry']:.4f} conf={decision['confidence']}% "
+                  f"SL={decision['stop_loss']:.4f} TP1={decision['take_profit_1']:.4f}")
 
             return decision
 
@@ -353,9 +433,7 @@ Respond in EXACTLY this JSON format (no markdown, no code fences):
         if not self.available:
             return {"summary": "Groq unavailable", "lessons": []}
 
-        stats = self._load_trade_stats()
-        recent = self._load_recent_trades(10)
-
+        stats = self._load_stats()
         meta = {}
         try:
             conn = self._get_conn()
@@ -369,41 +447,37 @@ Respond in EXACTLY this JSON format (no markdown, no code fences):
         except Exception:
             pass
 
-        prompt = f"""You are Aegis, reviewing your own closed trade. Be honest and learn from it.
+        prompt = f"""You are Aegis, reviewing your own closed trade. Be brutally honest.
 
-TRADE RESULT:
-- Symbol: {trade.get('symbol')} | Direction: {trade.get('direction')}
-- Result: {trade.get('result')} | Exit: {trade.get('exit_reason')}
-- Entry: {trade.get('entry_price')} → Exit: {trade.get('exit_price')}
-- R-multiple: {trade.get('actual_r', 0):.2f}R
-- Confidence was: {trade.get('confidence_score', 0)}%
-- Your reasoning at entry: {meta.get('llm_reasoning', 'N/A')}
-- What you saw: {meta.get('llm_observation', 'N/A')}
+TRADE: {trade.get('symbol')} {trade.get('direction')} ({meta.get('mode', '?')})
+Result: {trade.get('result')} | {trade.get('actual_r', 0):.2f}R | Exit: {trade.get('exit_reason')}
+Entry: {trade.get('entry_price')} → Exit: {trade.get('exit_price')}
+Your reasoning: {meta.get('llm_reasoning', 'N/A')}
+What you saw: {meta.get('llm_observation', 'N/A')}
 
-YOUR STATS: {stats['total']} trades, {stats['win_rate']:.0f}% win rate, {stats['avg_r']:.2f} avg R
-RECENT: {self._format_recent_trades(recent)}
+Stats: {stats['total']} trades, {stats['win_rate']:.0f}% WR, {stats['avg_r']:.2f} avg R
 
-Be brutally honest. What did you get right? What did you get wrong? What pattern should you remember?
+What did you get right? What did you miss? What should you remember next time?
 
-Respond in JSON:
+JSON only:
 {{
-  "summary": "one-line summary",
-  "what_went_right": "what you got correct",
-  "what_went_wrong": "what you missed or got wrong",
-  "lesson": "the key takeaway to remember",
+  "summary": "one line",
+  "what_went_right": "...",
+  "what_went_wrong": "...",
+  "lesson": "key takeaway",
   "should_repeat": true/false,
-  "confidence_adjustment": <-5 to +5, how to adjust future confidence for similar setups>
+  "confidence_adjustment": <-5 to +5>
 }}"""
 
         try:
             response = self.client.chat.completions.create(
                 model=self.MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a self-aware trading AI learning from its decisions. Respond with valid JSON only."},
+                    {"role": "system", "content": "Self-aware trading AI. JSON only."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.5,
-                max_tokens=500,
+                max_tokens=400,
                 timeout=30,
             )
 
@@ -415,29 +489,21 @@ Respond in JSON:
             raw = raw.strip()
 
             review = json.loads(raw)
-
-            # Save to journal
-            self._save_review(trade["trade_id"], review, meta)
-
+            self._save_review(trade["trade_id"], review)
             return review
 
         except Exception as e:
             print(f"[GroqTrader] Review error: {e}")
             return {"summary": "review failed", "lesson": "N/A"}
 
-    def _save_review(self, trade_id: str, review: dict, original_meta: dict) -> None:
-        """Save the self-review to the trade analysis table."""
+    def _save_review(self, trade_id: str, review: dict) -> None:
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
-
         lessons = [review.get("lesson", "")]
         if review.get("what_went_right"):
             lessons.append(f"Right: {review['what_went_right']}")
         if review.get("what_went_wrong"):
             lessons.append(f"Wrong: {review['what_went_wrong']}")
-
-        summary = review.get("summary", "")
-        quality = "valid" if review.get("should_repeat", True) else "poor"
 
         conn.execute("""
             INSERT OR REPLACE INTO trade_analysis
@@ -445,44 +511,40 @@ Respond in JSON:
                  execution_quality, lessons, confidence, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            trade_id, summary, quality, "neutral", "average",
+            trade_id, review.get("summary", ""),
+            "valid" if review.get("should_repeat", True) else "poor",
+            "neutral", "average",
             json.dumps(lessons), 70, now,
         ))
         conn.commit()
         conn.close()
 
     def weekly_review(self) -> str:
-        """Generate a comprehensive weekly performance review."""
+        """Comprehensive weekly review for the check-in automations."""
         if not self.available:
-            return "Groq unavailable for review"
+            return "Groq unavailable"
 
-        stats = self._load_trade_stats()
+        stats = self._load_stats()
         recent = self._load_recent_trades(30)
 
         if stats["total"] == 0:
             return "No trades to review yet."
 
-        prompt = f"""You are Aegis, reviewing your weekly trading performance.
+        prompt = f"""Weekly trading review.
 
-STATS: {stats['total']} trades | {stats['win_rate']:.0f}% win rate | {stats['avg_r']:.2f} avg R | {stats['total_r']:.2f} total R
+Stats: {stats['total']} trades | {stats['win_rate']:.0f}% WR | {stats['avg_r']:.2f} avg R | {stats['total_r']:.2f} total R
+Scalp: {stats['scalp_win_rate']:.0f}% WR ({stats['scalp_total']} trades)
 
-RECENT TRADES:
+Recent:
 {self._format_recent_trades(recent)}
 
-Provide a detailed weekly review:
-1. Overall performance assessment
-2. What's working well
-3. What needs improvement
-4. Specific adjustments for next week (confidence levels, session focus, risk sizing)
-5. Key lesson learned
-
-Be concise but specific."""
+Provide: 1) Performance assessment 2) What's working 3) What to improve 4) Next week adjustments"""
 
         try:
             response = self.client.chat.completions.create(
                 model=self.MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a self-aware trading AI doing a weekly review. Be honest and specific."},
+                    {"role": "system", "content": "Self-aware trading AI doing weekly review."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.4,
@@ -491,4 +553,4 @@ Be concise but specific."""
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            return f"Weekly review error: {e}"
+            return f"Error: {e}"

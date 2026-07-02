@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-Aegis Autonomous Trader v2 — Groq AI Brain + Paper Trading Training Mode.
+Aegis Autonomous Trader v2 — Groq AI Hunter + Paper Trading Training Mode.
 
-ARCHITECTURE CHANGE:
-- Groq LLM IS the trader (makes all decisions based on live market data)
-- Paper trading mode: simulates fills, no real money
-- Scalping-first: 5min/15min timeframes, tight TP/SL
-- Hybrid: takes swing trades on high-conviction setups
-- Learns from every trade via in-context examples
-- Performance gate: only goes live after 50+ demo trades with >52% win rate
+The LLM IS the trader. It receives pre-processed market intelligence
+(momentum, volume, patterns, key levels) and makes all decisions.
 
-Usage:
-  python3 autonomous_trader.py              # one cycle
-  python3 autonomous_trader.py --loop        # continuous 5-min loop
-  python3 autonomous_trader.py --stats       # show training stats
+Scalping-first hybrid: 5min/15min, tight SL, quick TP, wider sessions.
+Paper mode: $10,000 virtual balance, simulated slippage + fees, no real money.
+Learning loop: reviews every closed trade, feeds lessons into future decisions.
+Performance gate: 50+ demo trades at >52% win rate → go live.
 """
 import os, sys, asyncio, json, sqlite3, signal
 import urllib.request, urllib.parse
@@ -21,27 +16,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-# ── Setup ──────────────────────────────────────────────────────────
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env", override=True)
 
-# Also load from .agents/.env if running from sandbox
 agents_env = ROOT.parent.parent.parent / ".agents" / ".env"
 if agents_env.exists():
     load_dotenv(agents_env, override=False)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "6472746064")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6472746064")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 
 from database.connection import init_database, set_db_path
 DB_PATH = ROOT / "data" / "journal.db"
 set_db_path(DB_PATH)
 
-# Scalping symbols (high liquidity)
+# Scalping symbols — high liquidity only
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 CYCLE_INTERVAL = 300  # 5 minutes
 
@@ -59,19 +52,16 @@ def send_telegram(text: str) -> None:
         print(f"[Telegram] {e}")
 
 
-# ── Fetch market data ──────────────────────────────────────────────
+# ── Market data ────────────────────────────────────────────────────
 async def fetch_market_data(symbol: str) -> dict:
-    """Fetch 5min + 15min candles + funding rate for a symbol."""
+    """Fetch 5min + 15min candles + funding rate."""
     from exchange.bitget_client import BitgetMarketClient
     client = BitgetMarketClient()
-
     ticker = await client.get_ticker(symbol)
     candles_5m = await client.get_candles(symbol, "5m", 100)
     candles_15m = await client.get_candles(symbol, "15m", 100)
     funding = await client.get_funding_rate(symbol)
-
     await client.close()
-
     return {
         "symbol": symbol,
         "ticker": ticker,
@@ -83,7 +73,7 @@ async def fetch_market_data(symbol: str) -> dict:
 
 
 async def fetch_all_prices(symbols: list[str]) -> dict[str, float]:
-    """Get current prices for all symbols (for position monitoring)."""
+    """Get current prices for position monitoring."""
     from exchange.bitget_client import BitgetMarketClient
     client = BitgetMarketClient()
     prices = {}
@@ -95,14 +85,13 @@ async def fetch_all_prices(symbols: list[str]) -> dict[str, float]:
     return prices
 
 
-# ── Main trading cycle ─────────────────────────────────────────────
+# ── Main cycle ─────────────────────────────────────────────────────
 async def run_cycle() -> dict:
-    """Run one complete trading cycle with Groq as the brain."""
+    """One complete trading cycle — Groq brain + paper execution."""
     init_database(DB_PATH)
     utc_now = datetime.now(timezone.utc)
-    print(f"\n[{utc_now.strftime('%H:%M UTC')}] === AEGIS GROQ TRADER (PAPER MODE) ===")
+    print(f"\n[{utc_now.strftime('%H:%M UTC')}] ═══ AEGIS GROQ HUNTER (PAPER) ═══")
 
-    # 1. Initialize Groq trader + paper engine
     from llm.groq_trader import GroqTrader
     from paper_trading.paper_engine import PaperEngine
 
@@ -113,55 +102,61 @@ async def run_cycle() -> dict:
         print("[FATAL] Groq not available — check LLM_API_KEY")
         return {"error": "no_groq"}
 
-    session, is_active = trader.get_session()
-    print(f"[Session] {session} | Active: {is_active}")
+    session, is_active, progress = trader.get_session()
+    print(f"[Session] {session} ({progress*100:.0f}% in) | Active: {is_active}")
     print(f"[Balance] ${engine.get_balance():,.2f}")
 
-    # 2. Check existing positions (close at TP/SL)
+    # 1. Check & close positions at TP/SL
     prices = await fetch_all_prices(SYMBOLS)
+
+    # Also check for open positions on symbols we monitor
+    open_positions = engine.get_open_positions()
+    for pos in open_positions:
+        if pos["symbol"] not in prices:
+            prices[pos["symbol"]] = pos["entry_price"]  # fallback
+
     closed = engine.check_positions(prices)
+
+    # 2. Close stale scalps (max 25 min hold)
+    stale_closed = engine.close_stale_positions(prices, max_hold_minutes=25)
+    closed.extend(stale_closed)
+
     if closed:
         print(f"[Monitor] {len(closed)} position(s) closed")
-        # Run Groq self-review on each closed trade
+        # Groq self-review on each close
         for trade in closed:
             try:
                 review = trader.review_own_trade(trade)
-                print(f"[Learn] {trade['symbol']}: {review.get('lesson', 'N/A')[:80]}")
+                lesson = review.get("lesson", "N/A")
+                print(f"[Learn] {trade['symbol']}: {lesson[:80]}")
             except Exception as e:
                 print(f"[Learn] Review error: {e}")
 
-    # 3. If in active session, scan for new trades
+    # 3. Scan for new trades (only in active session)
     new_trades = []
     if is_active:
-        print(f"[Scan] Scanning {len(SYMBOLS)} symbols for setups...")
-
-        # Get current open positions
+        print(f"[Hunt] Scanning {len(SYMBOLS)} symbols for setups...")
         open_positions = engine.get_open_positions()
         open_symbols = {p["symbol"] for p in open_positions}
 
         for symbol in SYMBOLS:
             if symbol in open_symbols:
-                print(f"[Scan] {symbol} already has open position — skip")
                 continue
 
             try:
                 data = await fetch_market_data(symbol)
                 if not data["candles_5m"] or not data["candles_15m"]:
-                    print(f"[Scan] {symbol}: insufficient data")
                     continue
 
-                # Ask Groq to make a trading decision
                 decision = trader.make_trading_decision(
                     symbol=symbol,
                     candles_5m=data["candles_5m"],
                     candles_15m=data["candles_15m"],
                     funding_rate=data["funding_rate"],
-                    current_price=data["current_price"],
                     open_positions=open_positions,
                 )
 
                 if decision and decision.get("decision") == "TRADE":
-                    # Execute in paper engine
                     result = engine.open_position(decision)
                     if result:
                         new_trades.append(result)
@@ -169,25 +164,27 @@ async def run_cycle() -> dict:
                         open_symbols.add(symbol)
 
             except Exception as e:
-                print(f"[Scan] {symbol}: error: {e}")
-                continue
+                print(f"[Hunt] {symbol}: error: {e}")
 
-    # 4. Summary
+    # 4. Summary + stats
     stats = engine.get_performance_stats()
-    print(f"\n[Summary] Session: {session} | New: {len(new_trades)} | Closed: {len(closed)}")
-    print(f"[Stats] {stats['total_trades']} trades | {stats['win_rate']:.0f}% WR | "
+
+    print(f"\n═══ CYCLE SUMMARY ═══")
+    print(f"Session: {session} ({progress*100:.0f}%) | New: {len(new_trades)} | Closed: {len(closed)}")
+    print(f"Stats: {stats['total_trades']} trades | {stats['win_rate']:.0f}% WR | "
           f"{stats['avg_r']:.2f} avg R | Balance: ${stats['balance']:,.2f}")
 
     if stats["ready_for_live"]:
-        print("[GATE] ✅ Ready for LIVE trading! (50+ trades, >52% win rate)")
-        send_telegram("🎯 PAPER TRAINING COMPLETE!\n\n"
-                       f"Stats: {stats['total_trades']} trades | {stats['win_rate']:.0f}% WR | {stats['avg_r']:.2f} avg R\n"
-                       f"Balance: ${stats['balance']:,.2f}\n\n"
-                       f"Ready to switch to live trading. Set TRADING_MODE=LIVE to begin.")
-    elif stats["total_trades"] > 0 and stats["total_trades"] % 10 == 0:
-        # Every 10 trades, send a progress update
+        print("🎯 GATE PASSED — Ready for live trading!")
         send_telegram(
-            f"📊 Training Progress: {stats['total_trades']}/{50} trades\n"
+            "🎯 TRAINING COMPLETE!\n\n"
+            f"{stats['total_trades']} trades | {stats['win_rate']:.0f}% WR | {stats['avg_r']:.2f} avg R\n"
+            f"Balance: ${stats['balance']:,.2f}\n\n"
+            f"Ready for live. Set Bitget credentials to begin."
+        )
+    elif stats["total_trades"] > 0 and stats["total_trades"] % 10 == 0:
+        send_telegram(
+            f"📊 Training: {stats['total_trades']}/50 trades\n"
             f"Win rate: {stats['win_rate']:.0f}% (need 52%)\n"
             f"Avg R: {stats['avg_r']:.2f} | Total R: {stats['total_r']:.2f}\n"
             f"Balance: ${stats['balance']:,.2f}\n"
@@ -196,6 +193,7 @@ async def run_cycle() -> dict:
 
     return {
         "session": session,
+        "progress": progress,
         "is_active": is_active,
         "new_trades": len(new_trades),
         "closed_trades": len(closed),
@@ -207,7 +205,7 @@ async def run_cycle() -> dict:
 
 
 async def loop():
-    """Continuous loop mode."""
+    """Continuous 5-min loop."""
     running = True
 
     def handle_signal(sig, frame):
@@ -224,17 +222,20 @@ async def loop():
     init_database(DB_PATH)
     trader = GroqTrader()
     engine = PaperEngine()
-
     stats = engine.get_performance_stats()
+
     send_telegram(
-        f"🤖 Aegis Groq Trader Started (PAPER MODE)\n\n"
+        "🤖 AEGIS GROQ HUNTER — STARTED\n\n"
+        f"Mode: PAPER (training)\n"
         f"Brain: Groq llama-3.3-70b\n"
-        f"Style: Scalper-first hybrid\n"
+        f"Style: Scalper-first hunter\n"
         f"Balance: ${stats['balance']:,.2f}\n"
         f"Trades: {stats['total_trades']}/50 to live\n"
         f"Symbols: {', '.join(SYMBOLS)}\n"
-        f"Sessions: London 07-11 UTC | NY 13-17 UTC\n"
-        f"Mode: Training (no real money)"
+        f"Sessions: London 07-11 | NY 13-17 UTC\n"
+        f"Max hold: 25 min (scalps)\n"
+        f"Cycle: every 5 min\n\n"
+        f"🧠 The hunter is hungry. Let's eat."
     )
 
     while running:
@@ -246,14 +247,13 @@ async def loop():
             traceback.print_exc()
 
         if running:
-            print(f"[Loop] Next cycle in {CYCLE_INTERVAL}s...")
             await asyncio.sleep(CYCLE_INTERVAL)
 
-    send_telegram("🛑 Aegis Trader stopped")
+    send_telegram("🛑 Aegis Hunter stopped")
 
 
 def show_stats():
-    """Show current training statistics."""
+    """Print training stats."""
     init_database(DB_PATH)
     from paper_trading.paper_engine import PaperEngine
     from llm.groq_trader import GroqTrader
@@ -262,21 +262,20 @@ def show_stats():
     trader = GroqTrader()
     stats = engine.get_performance_stats()
 
-    print("\n" + "="*50)
-    print("  AEGIS GROQ TRADER — TRAINING STATS")
-    print("="*50)
-    print(f"  Mode: PAPER (training)")
-    print(f"  Balance: ${stats['balance']:,.2f}")
-    print(f"  Total trades: {stats['total_trades']}")
-    print(f"  Wins: {stats['wins']} | Losses: {stats['losses']}")
-    print(f"  Win rate: {stats['win_rate']:.1f}%")
-    print(f"  Avg R: {stats['avg_r']:.2f}")
-    print(f"  Total R: {stats['total_r']:.2f}")
-    print(f"  Trades to live: {stats['trades_to_live']}")
-    print(f"  Win rate gap: {stats['win_rate_gap']:.1f}%")
-    print(f"  Ready for live: {'✅ YES' if stats['ready_for_live'] else '❌ Not yet'}")
-    print(f"  Groq available: {'✅' if trader.available else '❌'}")
-    print("="*50)
+    print("\n" + "═"*55)
+    print("  AEGIS GROQ HUNTER — TRAINING STATS")
+    print("═"*55)
+    print(f"  Mode:       PAPER (training)")
+    print(f"  Balance:    ${stats['balance']:,.2f}")
+    print(f"  Total:      {stats['total_trades']} trades")
+    print(f"  W/L:        {stats['wins']}W / {stats['losses']}L")
+    print(f"  Win rate:   {stats['win_rate']:.1f}%")
+    print(f"  Avg R:      {stats['avg_r']:.2f}")
+    print(f"  Total R:    {stats['total_r']:.2f}")
+    print(f"  To live:    {stats['trades_to_live']} trades, {stats['win_rate_gap']:.1f}% WR gap")
+    print(f"  Ready:      {'✅ YES' if stats['ready_for_live'] else '❌ Not yet'}")
+    print(f"  Groq:       {'✅' if trader.available else '❌'}")
+    print("═"*55)
 
 
 def main():
@@ -288,9 +287,10 @@ def main():
         result = asyncio.run(run_cycle())
         if "error" not in result:
             s = result
-            print(f"\n✅ Cycle done: {s['session']} | New: {s['new_trades']} | "
-                  f"Closed: {s['closed_trades']} | Balance: ${s['balance']:,.2f} | "
-                  f"Total: {s['total_trades']} trades | WR: {s['win_rate']:.0f}%")
+            print(f"\n✅ Done: {s['session']} ({s['progress']*100:.0f}%) | "
+                  f"New: {s['new_trades']} | Closed: {s['closed_trades']} | "
+                  f"Balance: ${s['balance']:,.2f} | Total: {s['total_trades']} trades | "
+                  f"WR: {s['win_rate']:.0f}%")
 
 
 if __name__ == "__main__":

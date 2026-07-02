@@ -308,24 +308,24 @@ class PaperEngine:
             if direction == "LONG":
                 if price <= sl:
                     should_close, trigger = True, "SL_HIT"
-                    exit_price = self.apply_slippage(price, direction, is_entry=False)
+                    exit_price = self.apply_slippage(sl, direction, is_entry=False)  # Fill at SL price, not current
                 elif status == "OPEN" and price >= tp1:
                     # TP1 hit — partial close
                     should_close, trigger = True, "TP1_HIT"
-                    exit_price = self.apply_slippage(price, direction, is_entry=False)
+                    exit_price = self.apply_slippage(tp1, direction, is_entry=False)  # Fill at TP1 price
                 elif price >= tp:
                     should_close, trigger = True, "TP_HIT"
-                    exit_price = self.apply_slippage(price, direction, is_entry=False)
+                    exit_price = self.apply_slippage(tp, direction, is_entry=False)  # Fill at TP price
             else:  # SHORT
                 if price >= sl:
                     should_close, trigger = True, "SL_HIT"
-                    exit_price = self.apply_slippage(price, direction, is_entry=False)
+                    exit_price = self.apply_slippage(sl, direction, is_entry=False)  # Fill at SL price, not current
                 elif status == "OPEN" and price <= tp1:
                     should_close, trigger = True, "TP1_HIT"
-                    exit_price = self.apply_slippage(price, direction, is_entry=False)
+                    exit_price = self.apply_slippage(tp1, direction, is_entry=False)  # Fill at TP1 price
                 elif price <= tp:
                     should_close, trigger = True, "TP_HIT"
-                    exit_price = self.apply_slippage(price, direction, is_entry=False)
+                    exit_price = self.apply_slippage(tp, direction, is_entry=False)  # Fill at TP price
 
             if should_close:
                 closed_trade = self._close_position(trade, exit_price, trigger, conn, meta)
@@ -485,3 +485,64 @@ class PaperEngine:
             "trades_to_live": max(0, LIVE_GATE_MIN_TRADES - total),
             "win_rate_gap": max(0, LIVE_GATE_MIN_WIN_RATE - win_rate),
         }
+
+
+    def close_stale_positions(self, current_prices: dict[str, float], max_hold_minutes: int = 25) -> list[dict]:
+        """Auto-close scalp positions that have been open too long.
+
+        Real scalpers don't hold dead trades. If price hasn't hit TP or SL
+        within 25 minutes, close at market and move on.
+        """
+        conn = _get_conn()
+        open_trades = conn.execute(
+            "SELECT * FROM trades WHERE status IN ('OPEN', 'PARTIAL')"
+        ).fetchall()
+
+        closed = []
+        now = datetime.now(timezone.utc)
+
+        for trade in open_trades:
+            trade = dict(trade)
+            symbol = trade["symbol"]
+            if symbol not in current_prices:
+                continue
+
+            # Check hold time
+            opened_at_str = trade.get("opened_at", "")
+            try:
+                opened_at = datetime.fromisoformat(opened_at_str.replace("Z", "+00:00"))
+                hold_minutes = (now - opened_at).total_seconds() / 60
+            except Exception:
+                continue
+
+            if hold_minutes < max_hold_minutes:
+                continue
+
+            # Get metadata for mode
+            signal_row = conn.execute(
+                "SELECT metadata FROM signals WHERE signal_id=?",
+                (trade["signal_id"],)
+            ).fetchone()
+            meta = {}
+            if signal_row:
+                try:
+                    meta = json.loads(signal_row[0] or "{}")
+                except Exception:
+                    pass
+
+            mode = meta.get("mode", "SCALP")
+            # Only auto-close scalps (swing trades get more time)
+            if mode != "SCALP":
+                continue
+
+            price = current_prices[symbol]
+            exit_price = self.apply_slippage(price, trade["direction"], is_entry=False)
+            print(f"[Paper] STALE CLOSE: {symbol} held {hold_minutes:.0f}min — auto-closing at {exit_price:.4f}")
+
+            closed_trade = self._close_position(trade, exit_price, "TIMEOUT", conn, meta)
+            if closed_trade:
+                closed.append(closed_trade)
+
+        conn.commit()
+        conn.close()
+        return closed
