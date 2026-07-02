@@ -1,0 +1,40 @@
+name: Aegis Autonomous Trader
+on:
+  schedule:
+    # Every 5 minutes (UTC)
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore journal DB
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: aegis-journal-${{ github.run_id }}
+          restore-keys: |
+            aegis-journal-
+
+      - name: Install dependencies
+        run: |
+          pip install httpx python-dotenv groq pydantic
+
+      - name: Run Aegis Trader Cycle
+        env:
+          BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
+          BITGET_SECRET_KEY: ${{ secrets.BITGET_SECRET_KEY }}
+          BITGET_PASSPHRASE: ${{ secrets.BITGET_PASSPHRASE }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 autonomous_trader.py 2>&1

@@ -1,0 +1,26 @@
+# Aegis Trader - Futures Signal Intelligence Engine
+# Python 3.12+
+
+# Core
+pydantic>=2.0
+python-dotenv>=1.0
+
+# Telegram
+python-telegram-bot>=21.0
+
+# Bitget Market Data (no keys needed for public data)
+bitget-python>=1.0
+
+# HTTP / WebSocket
+httpx>=0.27
+websockets>=12.0
+
+# Data & Time
+python-dateutil>=2.9
+
+# Testing
+pytest>=8.0
+pytest-asyncio>=0.23
+
+# Logging
+structlog>=24.0
