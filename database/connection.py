@@ -77,6 +77,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             CREATE TABLE trades AS SELECT * FROM trades_backup WHERE 0;
             INSERT INTO trades SELECT * FROM trades_backup;
             DROP TABLE trades_backup;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_id ON trades(trade_id);
         """)
         conn.execute("PRAGMA foreign_keys = ON")
         print("  [migrate] trades status constraint fixed ✅")
@@ -107,6 +108,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             CREATE TABLE signals AS SELECT * FROM signals_backup WHERE 0;
             INSERT INTO signals SELECT * FROM signals_backup;
             DROP TABLE signals_backup;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_id ON signals(signal_id);
         """)
         conn.execute("PRAGMA foreign_keys = ON")
         print("  [migrate] signals source constraint fixed ✅")
