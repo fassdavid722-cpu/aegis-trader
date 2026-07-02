@@ -70,6 +70,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     schema = conn.execute("SELECT sql FROM sqlite_master WHERE name='trades'").fetchone()
     if schema and "PARTIAL" not in schema[0]:
         print("  [migrate] fixing trades status CHECK constraint (adding PARTIAL)")
+        conn.execute("PRAGMA foreign_keys = OFF")
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS trades_new AS SELECT * FROM trades WHERE 0;
             INSERT INTO trades_new SELECT * FROM trades;
@@ -107,6 +108,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             INSERT INTO trades SELECT * FROM trades_new;
             DROP TABLE trades_new;
         """)
+        conn.execute("PRAGMA foreign_keys = ON")
         print("  [migrate] trades status constraint fixed ✅")
 
     # Fix: trade_analysis CHECK constraints (remove them)
@@ -131,6 +133,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             INSERT INTO trade_analysis SELECT * FROM ta_new;
             DROP TABLE ta_new;
         """)
+        conn.execute("PRAGMA foreign_keys = ON")
         print("  [migrate] trade_analysis constraints fixed ✅")
 
     # Fix: signals source CHECK constraint
@@ -161,6 +164,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             INSERT INTO signals SELECT * FROM signals_new;
             DROP TABLE signals_new;
         """)
+        conn.execute("PRAGMA foreign_keys = ON")
         print("  [migrate] signals source constraint fixed ✅")
 
     conn.commit()
