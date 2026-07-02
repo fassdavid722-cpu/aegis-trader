@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS trades (
     take_profit REAL,
     liquidation_price REAL,
     margin_used REAL,
-    status TEXT NOT NULL CHECK(status IN ('PENDING', 'OPEN', 'CLOSED', 'EXPIRED', 'INVALID')),
+    status TEXT NOT NULL CHECK(status IN ('PENDING', 'OPEN', 'PARTIAL', 'CLOSED', 'EXPIRED', 'INVALID')),
     opened_at TEXT,
     closed_at TEXT,
     exit_price REAL,
