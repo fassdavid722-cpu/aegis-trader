@@ -1,14 +1,21 @@
 name: Aegis Autonomous Trader
+
 on:
   schedule:
-    # Every 5 minutes (UTC)
-    - cron: '*/5 * * * *'
+    # Safety-net only — GitHub's cron scheduler is unreliable for tight
+    # intervals, so the real cadence comes from the self-perpetuating loop
+    # below. This just re-kicks the chain if it ever dies.
+    - cron: '0 */6 * * *'
   workflow_dispatch: {}
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   trade:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +35,7 @@ jobs:
         run: |
           pip install httpx python-dotenv groq pydantic
 
-      - name: Run Aegis Trader Cycle
+      - name: Run continuous trading loop (~5.5 hours, 5-min cycles)
         env:
           BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
           BITGET_SECRET_KEY: ${{ secrets.BITGET_SECRET_KEY }}
@@ -37,4 +44,20 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python3 autonomous_trader.py 2>&1
+          END_TIME=$(( $(date +%s) + 335*60 ))
+          CYCLE=1
+          while [ "$(date +%s)" -lt "$END_TIME" ]; do
+            echo "=== Cycle $CYCLE — $(date -u +%H:%M:%S) UTC ==="
+            python3 autonomous_trader.py 2>&1 || echo "[loop] cycle failed, continuing"
+            CYCLE=$((CYCLE + 1))
+            sleep 300
+          done
+
+      - name: Re-trigger self to keep the chain alive forever
+        if: always()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/aegis-trader.yml/dispatches" \
+            -d '{"ref":"main"}'
