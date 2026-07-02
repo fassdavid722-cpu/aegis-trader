@@ -26,6 +26,7 @@ except ImportError:
     HAS_GROQ = False
 
 from analyst.market_intelligence import build_intelligence, MarketIntelligence
+from analyst.regime_detector_v2 import detect_regime, should_trade_against_regime, MarketRegime
 
 DB_PATH = Path(__file__).parent.parent / "data" / "journal.db"
 
@@ -219,8 +220,11 @@ class GroqTrader:
         session: str,
         session_progress: float,
         open_positions: list[dict],
+        market_regime: Optional[Any] = None,
     ) -> str:
         """Build the hunter prompt."""
+
+        regime_briefing = market_regime.to_briefing() + "\n" if market_regime else ""
 
         hunger = self._build_hunger_context(stats, session, session_progress)
 
@@ -288,6 +292,8 @@ YOUR DECISION:
 Look at the pre-processed signals above. If signal_strength >= 4, you should probably trade.
 If there's a pattern + volume + momentum alignment, that's your edge. Take it.
 
+{regime_briefing}
+
 Choose TRADE only if you can articulate: (1) what edge you see, (2) where your SL goes and why,
 (3) where price should go and why. If you can't answer all three, don't trade.
 
@@ -315,6 +321,7 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
         candles_15m: list[dict],
         funding_rate: Optional[float],
         open_positions: list[dict] = None,
+        market_regime: Optional[Any] = None,
     ) -> Optional[dict[str, Any]]:
         """Make a trading decision using market intelligence + Groq."""
         if not self.available:
@@ -350,7 +357,7 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
 
         prompt = self._build_prompt(
             intel, funding_rate, stats, recent, lessons,
-            session, progress, open_positions or [],
+            session, progress, open_positions or [], market_regime,
         )
 
         try:
@@ -412,6 +419,13 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
                     decision["stop_loss"] = decision["entry"] * 0.995  # 0.5% SL
                 else:
                     decision["stop_loss"] = decision["entry"] * 1.005
+
+            # Check against market regime
+            if market_regime is not None:
+                allowed, regime_reason = should_trade_against_regime(market_regime, decision["direction"], decision["confidence"])
+                if not allowed:
+                    print(f"[GroqTrader] {symbol}: BLOCKED by regime — {regime_reason}")
+                    return None
 
             mode = decision.get("mode", "SCALP")
             emoji = "🟢" if decision["direction"] == "LONG" else "🔴"

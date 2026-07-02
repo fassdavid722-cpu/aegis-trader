@@ -136,6 +136,22 @@ async def run_cycle() -> dict:
     new_trades = []
     if is_active:
         print(f"[Hunt] Scanning {len(SYMBOLS)} symbols for setups...")
+
+        # Market regime check — top-down approach
+        from analyst.regime_detector_v2 import detect_regime
+        try:
+            from exchange.bitget_client import BitgetMarketClient
+            btc_client = BitgetMarketClient()
+            btc_1h = await btc_client.get_candles("BTCUSDT", "1H", 50)
+            btc_15m = await btc_client.get_candles("BTCUSDT", "15m", 50)
+            await btc_client.close()
+            market_regime = detect_regime(btc_1h, btc_15m)
+            print(f"[Regime] {market_regime.regime} ({market_regime.strength}/10) — {market_regime.bias}")
+            print(f"[Regime] {market_regime.description}")
+        except Exception as e:
+            print(f"[Regime] Detection failed: {e}")
+            market_regime = None
+
         open_positions = engine.get_open_positions()
         open_symbols = {p["symbol"] for p in open_positions}
 
@@ -154,6 +170,7 @@ async def run_cycle() -> dict:
                     candles_15m=data["candles_15m"],
                     funding_rate=data["funding_rate"],
                     open_positions=open_positions,
+                    market_regime=market_regime,
                 )
 
                 if decision and decision.get("decision") == "TRADE":

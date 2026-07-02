@@ -18,7 +18,7 @@ from .models_v2 import (
     ScanResult, MarketScan,
 )
 from .price_structure import PriceStructureAnalyzer
-from .regime_detector_v2 import RegimeDetectorV2
+from .regime_detector_v2 import detect_regime, MarketRegime
 from .session_filter import SessionFilter
 from .funding_filter import FundingFilter
 from .setup_detector_v2 import SetupDetectorV2
