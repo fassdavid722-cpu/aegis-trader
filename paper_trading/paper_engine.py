@@ -91,9 +91,11 @@ class PaperEngine:
             conn.commit()
         conn.close()
 
-    def _save_balance(self) -> None:
+    def _save_balance(self, conn=None) -> None:
         """Persist paper balance."""
-        conn = _get_conn()
+        own_conn = conn is None
+        if own_conn:
+            conn = _get_conn()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS paper_config (
                 key TEXT PRIMARY KEY,
@@ -105,7 +107,8 @@ class PaperEngine:
             (str(self.balance),)
         )
         conn.commit()
-        conn.close()
+        if own_conn:
+            conn.close()
 
     def get_balance(self) -> float:
         return self.balance
@@ -374,7 +377,7 @@ class PaperEngine:
         pnl -= fee
 
         self.balance += pnl
-        self._save_balance()
+        self._save_balance(conn)
 
         actual_r = round(pnl / risk_amount, 2) if risk_amount > 0 else 0
         result = "WIN" if pnl > 0 else "LOSS"
