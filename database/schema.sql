@@ -9,7 +9,7 @@
 -- Signals: every parsed alert, whether it becomes a trade or not
 CREATE TABLE IF NOT EXISTS signals (
     signal_id TEXT PRIMARY KEY,
-    source TEXT NOT NULL CHECK(source IN ('telegram', 'webhook')),
+    source TEXT NOT NULL CHECK(source IN ('telegram', 'webhook', 'analyst', 'groq')),
     raw_text TEXT NOT NULL,
     symbol TEXT NOT NULL,
     contract_type TEXT DEFAULT 'PERPETUAL',
