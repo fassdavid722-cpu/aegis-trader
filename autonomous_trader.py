@@ -206,7 +206,7 @@ async def run_cycle() -> dict:
 
             # Small delay between symbols to avoid Groq rate limiting (12k TPM)
             if symbol != SYMBOLS[0]:
-                await asyncio.sleep(2)
+                await asyncio.sleep(5)
 
             try:
                 data = await fetch_market_data(symbol, client=ctx_client)
