@@ -311,24 +311,27 @@ class PaperEngine:
             if direction == "LONG":
                 if price <= sl:
                     should_close, trigger = True, "SL_HIT"
-                    exit_price = self.apply_slippage(sl, direction, is_entry=False)  # Fill at SL price, not current
-                elif status == "OPEN" and price >= tp1:
-                    # TP1 hit — partial close
-                    should_close, trigger = True, "TP1_HIT"
-                    exit_price = self.apply_slippage(tp1, direction, is_entry=False)  # Fill at TP1 price
+                    exit_price = self.apply_slippage(sl, direction, is_entry=False)
                 elif price >= tp:
+                    # Full TP hit — close entire position at TP (check BEFORE TP1)
                     should_close, trigger = True, "TP_HIT"
-                    exit_price = self.apply_slippage(tp, direction, is_entry=False)  # Fill at TP price
+                    exit_price = self.apply_slippage(tp, direction, is_entry=False)
+                elif status == "OPEN" and price >= tp1:
+                    # TP1 hit — partial close (only if price hasn't reached full TP)
+                    should_close, trigger = True, "TP1_HIT"
+                    exit_price = self.apply_slippage(tp1, direction, is_entry=False)
             else:  # SHORT
                 if price >= sl:
                     should_close, trigger = True, "SL_HIT"
-                    exit_price = self.apply_slippage(sl, direction, is_entry=False)  # Fill at SL price, not current
-                elif status == "OPEN" and price <= tp1:
-                    should_close, trigger = True, "TP1_HIT"
-                    exit_price = self.apply_slippage(tp1, direction, is_entry=False)  # Fill at TP1 price
+                    exit_price = self.apply_slippage(sl, direction, is_entry=False)
                 elif price <= tp:
+                    # Full TP hit — close entire position at TP (check BEFORE TP1)
                     should_close, trigger = True, "TP_HIT"
-                    exit_price = self.apply_slippage(tp, direction, is_entry=False)  # Fill at TP price
+                    exit_price = self.apply_slippage(tp, direction, is_entry=False)
+                elif status == "OPEN" and price <= tp1:
+                    # TP1 hit — partial close (only if price hasn't reached full TP)
+                    should_close, trigger = True, "TP1_HIT"
+                    exit_price = self.apply_slippage(tp1, direction, is_entry=False)
 
             if should_close:
                 closed_trade = self._close_position(trade, exit_price, trigger, conn, meta)
