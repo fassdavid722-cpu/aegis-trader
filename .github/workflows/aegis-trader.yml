@@ -2,15 +2,14 @@ name: Aegis Autonomous Trader
 
 on:
   schedule:
-    # Safety-net only — GitHub's cron scheduler is unreliable for tight
-    # intervals, so the real cadence comes from the self-perpetuating loop
-    # below. This just re-kicks the chain if it ever dies.
+    # Safety-net only — the self-perpetuating loop is the primary driver.
+    # This re-kicks the chain if it ever dies (every 6 hours).
     - cron: '0 */6 * * *'
   workflow_dispatch: {}
 
 permissions:
   actions: write
-  contents: read
+  contents: write
 
 jobs:
   trade:
@@ -18,6 +17,8 @@ jobs:
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:
@@ -53,9 +54,24 @@ jobs:
             sleep 300
           done
 
-      - name: Re-trigger self to keep the chain alive forever
+      - name: Commit journal DB back to repo (trade memory persistence)
         if: always()
         run: |
+          git config user.name "Aegis Trader Bot"
+          git config user.email "actions@github.com"
+          git add data/journal.db 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No DB changes to commit"
+          else
+            git commit -m "chore: persist journal DB — $(date -u +%Y-%m-%dT%H:%M) UTC [skip ci]"
+            git push
+            echo "✅ Journal DB committed — next run will have full trade history"
+          fi
+
+      - name: Re-trigger self to keep the chain alive
+        if: always()
+        run: |
+          sleep 5
           curl -s -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \

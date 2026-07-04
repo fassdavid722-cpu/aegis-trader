@@ -15,15 +15,14 @@ build/
 .env
 .env.local
 
-# Data
-data/
-*.db
+# Data — journal DB IS tracked for trade memory persistence
+# (committed back to repo by GitHub Actions after each run)
+*.log
 *.sqlite
 *.sqlite3
 
 # Logs
 logs/
-*.log
 
 # IDE
 .vscode/
