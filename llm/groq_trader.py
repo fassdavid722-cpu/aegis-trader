@@ -309,10 +309,28 @@ class GroqTrader:
         session_progress: float,
         open_positions: list[dict],
         market_regime: Optional[Any] = None,
+        advanced_indicators: Optional[Any] = None,
+        market_context: Optional[Any] = None,
+        symbol_context: Optional[Any] = None,
     ) -> str:
-        """Build the hunter prompt."""
+        """Build the hunter prompt with full toolkit."""
 
         regime_briefing = market_regime.to_briefing() + "\n" if market_regime else ""
+
+        # Advanced indicator briefing
+        indicators_briefing = ""
+        if advanced_indicators:
+            indicators_briefing = advanced_indicators.to_briefing()
+
+        # Market context briefing
+        market_briefing = ""
+        if market_context:
+            market_briefing = market_context.to_briefing()
+
+        # Symbol order flow briefing
+        flow_briefing = ""
+        if symbol_context:
+            flow_briefing = symbol_context.to_briefing()
 
         hunger = self._build_hunger_context(stats, session, session_progress)
 
@@ -358,6 +376,15 @@ SWING PARAMETERS (only for high-conviction):
 
 {briefing}
 
+ADVANCED INDICATORS:
+{indicators_briefing}
+
+ORDER FLOW (real-time):
+{flow_briefing}
+
+MARKET CONTEXT (macro):
+{market_briefing}
+
 FUNDING RATE: {funding_text}
 
 {hunger}
@@ -385,9 +412,21 @@ LESSONS YOU'VE LEARNED:
 OPEN POSITIONS:
 {open_pos_text}
 
-YOUR DECISION:
-Look at the pre-processed signals above. If signal_strength >= 4, you should probably trade.
-If there's a pattern + volume + momentum alignment, that's your edge. Take it.
+YOUR TRADER TOOLKIT — use ALL of these:
+1. ADVANCED INDICATORS: VWAP tells you fair value. RSI tells you overbought/oversold. 
+   EMA alignment confirms trend. Bollinger Bands show volatility squeeze (breakout coming).
+   Volume Profile shows where real money is positioned (POC = strongest level).
+2. ORDER FLOW: Order book imbalance shows real buy/sell pressure. 
+   Taker buy/sell ratio shows aggressive market orders (smart money footprints).
+   L/S ratio shows crowded positioning (contrarian signals).
+3. MARKET CONTEXT: BTC trend moves ALL alts. If BTC is dumping, don't long alts.
+   Market breadth tells you if it's risk-on or risk-off.
+4. PRICE ACTION: Momentum, patterns, structure breaks, session context.
+5. YOUR TRACK RECORD: Your own history. If shorts keep losing, stop shorting.
+
+CONFLUENCE RULE: The best trades have 3+ tools pointing the same direction.
+Example: VWAP below price + RSI oversold + taker BUY_SIDE + EMA bullish = strong long.
+If tools disagree, be cautious or skip.
 
 {regime_briefing}
 
@@ -419,8 +458,11 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
         funding_rate: Optional[float],
         open_positions: list[dict] = None,
         market_regime: Optional[Any] = None,
+        advanced_indicators: Optional[Any] = None,
+        market_context: Optional[Any] = None,
+        symbol_context: Optional[Any] = None,
     ) -> Optional[dict[str, Any]]:
-        """Make a trading decision using market intelligence + Groq."""
+        """Make a trading decision using market intelligence + advanced indicators + Groq."""
         if not self.available:
             print(f"[GroqTrader] {symbol}: Groq unavailable")
             return None

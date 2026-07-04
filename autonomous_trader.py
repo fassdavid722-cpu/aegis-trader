@@ -53,15 +53,22 @@ def send_telegram(text: str) -> None:
 
 
 # ── Market data ────────────────────────────────────────────────────
-async def fetch_market_data(symbol: str) -> dict:
-    """Fetch 5min + 15min candles + funding rate."""
+async def fetch_market_data(symbol: str, client=None) -> dict:
+    """Fetch 5min + 15min candles + funding + order book + L/S ratio + taker flow."""
     from exchange.bitget_client import BitgetMarketClient
-    client = BitgetMarketClient()
-    ticker = await client.get_ticker(symbol)
-    candles_5m = await client.get_candles(symbol, "5m", 100)
-    candles_15m = await client.get_candles(symbol, "15m", 100)
-    funding = await client.get_funding_rate(symbol)
-    await client.close()
+    own_client = client is None
+    if own_client:
+        client = BitgetMarketClient()
+    try:
+        ticker = await client.get_ticker(symbol)
+        candles_5m = await client.get_candles(symbol, "5m", 100)
+        candles_15m = await client.get_candles(symbol, "15m", 100)
+        funding = await client.get_funding_rate(symbol)
+        orderbook = await client.get_orderbook(symbol)
+        ls_ratio = await client.get_long_short_ratio(symbol)
+    finally:
+        if own_client:
+            await client.close()
     return {
         "symbol": symbol,
         "ticker": ticker,
@@ -69,6 +76,8 @@ async def fetch_market_data(symbol: str) -> dict:
         "candles_15m": candles_15m,
         "funding_rate": funding,
         "current_price": ticker.last_price if ticker else 0,
+        "orderbook": orderbook,
+        "ls_ratio": ls_ratio,
     }
 
 
@@ -155,14 +164,60 @@ async def run_cycle() -> dict:
         open_positions = engine.get_open_positions()
         open_symbols = {p["symbol"] for p in open_positions}
 
+        # Fetch market context (BTC, breadth, funding) once for the cycle
+        from analyst.market_context import fetch_market_context, SymbolContext
+        from analyst.advanced_indicators import build_advanced_indicators
+        from exchange.bitget_client import BitgetMarketClient
+
+        ctx_client = BitgetMarketClient()
+        funding_map = {}
+        # We'll build this as we go
+        symbol_contexts = {}
+        market_ctx = None
+
+        try:
+            # Get all tickers for breadth
+            all_tickers = await ctx_client.get_all_tickers()
+            btc_ticker = all_tickers.get("BTCUSDT")
+            btc_price = btc_ticker.last_price if btc_ticker else 0
+            btc_change = btc_ticker.change_24h if btc_ticker else 0
+            alt_tickers = {k: v for k, v in all_tickers.items() if k in SYMBOLS and k != "BTCUSDT"}
+            breadth_up = sum(1 for t in alt_tickers.values() if t.change_24h > 0)
+            breadth_down = sum(1 for t in alt_tickers.values() if t.change_24h <= 0)
+
+            from analyst.market_context import MarketContext
+            market_ctx = MarketContext(
+                btc_price=btc_price,
+                btc_change_24h=btc_change,
+                btc_trend="UP" if btc_change > 1.0 else "DOWN" if btc_change < -1.0 else "FLAT",
+                breadth_up=breadth_up,
+                breadth_down=breadth_down,
+                breadth_signal="RISK_ON" if breadth_up > breadth_down * 2 else "RISK_OFF" if breadth_down > breadth_up * 2 else "NEUTRAL",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+            print(f"[Market] BTC ${btc_price:,.0f} ({btc_change:+.2f}%) | Breadth: {breadth_up}up/{breadth_down}down — {market_ctx.breadth_signal}")
+        except Exception as e:
+            print(f"[Market] Context fetch failed: {e}")
+            market_ctx = None
+
         for symbol in SYMBOLS:
             if symbol in open_symbols:
                 continue
 
             try:
-                data = await fetch_market_data(symbol)
+                data = await fetch_market_data(symbol, client=ctx_client)
                 if not data["candles_5m"] or not data["candles_15m"]:
                     continue
+
+                # Build advanced indicators
+                indicators = build_advanced_indicators(data["candles_5m"], data["candles_15m"])
+
+                # Build symbol context from fetched data
+                sym_ctx = SymbolContext(
+                    orderbook=data.get("orderbook"),
+                    long_short=data.get("ls_ratio"),
+                )
+                symbol_contexts[symbol] = sym_ctx
 
                 decision = trader.make_trading_decision(
                     symbol=symbol,
@@ -171,6 +226,9 @@ async def run_cycle() -> dict:
                     funding_rate=data["funding_rate"],
                     open_positions=open_positions,
                     market_regime=market_regime,
+                    advanced_indicators=indicators,
+                    market_context=market_ctx,
+                    symbol_context=sym_ctx,
                 )
 
                 if decision and decision.get("decision") == "TRADE":
@@ -182,6 +240,12 @@ async def run_cycle() -> dict:
 
             except Exception as e:
                 print(f"[Hunt] {symbol}: error: {e}")
+
+        # Close the shared client
+        try:
+            await ctx_client.close()
+        except Exception:
+            pass
 
     # 4. Summary + stats
     stats = engine.get_performance_stats()

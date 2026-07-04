@@ -334,6 +334,45 @@ class PaperEngine:
                 closed_trade = self._close_position(trade, exit_price, trigger, conn, meta)
                 if closed_trade:
                     closed.append(closed_trade)
+            else:
+                # BREAK-EVEN MANAGEMENT: Move SL to entry when price reaches 0.5R
+                # This protects profits and reduces losses on reversals
+                risk_dist = abs(entry - sl)
+                if risk_dist > 0:
+                    if direction == "LONG":
+                        # Price moved up by 0.5R → move SL to entry (break-even)
+                        if price >= entry + risk_dist * 0.5 and sl < entry:
+                            new_sl = entry  # Break-even
+                            conn.execute(
+                                "UPDATE trades SET stop_loss=? WHERE trade_id=?",
+                                (new_sl, trade["trade_id"])
+                            )
+                            print(f"[Manage] {symbol} LONG: SL moved to break-even @ {new_sl:.4f}")
+                        # Trailing stop: Price moved up by 1R → trail SL at 0.5R behind
+                        elif price >= entry + risk_dist and sl < entry + risk_dist * 0.5:
+                            new_sl = price - risk_dist * 0.5
+                            conn.execute(
+                                "UPDATE trades SET stop_loss=? WHERE trade_id=?",
+                                (new_sl, trade["trade_id"])
+                            )
+                            print(f"[Manage] {symbol} LONG: Trailing SL → {new_sl:.4f}")
+                    else:  # SHORT
+                        # Price moved down by 0.5R → move SL to entry
+                        if price <= entry - risk_dist * 0.5 and sl > entry:
+                            new_sl = entry
+                            conn.execute(
+                                "UPDATE trades SET stop_loss=? WHERE trade_id=?",
+                                (new_sl, trade["trade_id"])
+                            )
+                            print(f"[Manage] {symbol} SHORT: SL moved to break-even @ {new_sl:.4f}")
+                        # Trailing stop for shorts
+                        elif price <= entry - risk_dist and sl > entry - risk_dist * 0.5:
+                            new_sl = price + risk_dist * 0.5
+                            conn.execute(
+                                "UPDATE trades SET stop_loss=? WHERE trade_id=?",
+                                (new_sl, trade["trade_id"])
+                            )
+                            print(f"[Manage] {symbol} SHORT: Trailing SL → {new_sl:.4f}")
 
         conn.commit()
         conn.close()
