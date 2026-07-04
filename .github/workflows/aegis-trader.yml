@@ -2,8 +2,6 @@ name: Aegis Autonomous Trader
 
 on:
   schedule:
-    # Safety-net only — the self-perpetuating loop is the primary driver.
-    # This re-kicks the chain if it ever dies (every 6 hours).
     - cron: '0 */6 * * *'
   workflow_dispatch: {}
 
@@ -14,11 +12,9 @@ permissions:
 jobs:
   trade:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:
@@ -36,39 +32,26 @@ jobs:
         run: |
           pip install httpx python-dotenv groq pydantic
 
-      - name: Run continuous trading loop (~5.5 hours, 5-min cycles)
+      - name: Run single trading cycle
         env:
-          BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
-          BITGET_SECRET_KEY: ${{ secrets.BITGET_SECRET_KEY }}
-          BITGET_PASSPHRASE: ${{ secrets.BITGET_PASSPHRASE }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          END_TIME=$(( $(date +%s) + 335*60 ))
-          CYCLE=1
-          while [ "$(date +%s)" -lt "$END_TIME" ]; do
-            echo "=== Cycle $CYCLE — $(date -u +%H:%M:%S) UTC ==="
-            python3 autonomous_trader.py 2>&1 || echo "[loop] cycle failed, continuing"
-            CYCLE=$((CYCLE + 1))
-            sleep 300
-          done
+          python3 autonomous_trader.py 2>&1
 
-      - name: Commit journal DB back to repo (trade memory persistence)
+      - name: Commit journal DB
         if: always()
         run: |
           git config user.name "Aegis Trader Bot"
           git config user.email "actions@github.com"
           git add data/journal.db 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No DB changes to commit"
-          else
-            git commit -m "chore: persist journal DB — $(date -u +%Y-%m-%dT%H:%M) UTC [skip ci]"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: persist journal DB [skip ci]"
             git push
-            echo "✅ Journal DB committed — next run will have full trade history"
           fi
 
-      - name: Re-trigger self to keep the chain alive
+      - name: Re-trigger self
         if: always()
         run: |
           sleep 5
