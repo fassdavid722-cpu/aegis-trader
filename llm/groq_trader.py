@@ -39,13 +39,13 @@ class GroqTrader:
     # Session windows — crypto trades 24/7, but liquidity varies
     SESSIONS = {
         "ASIA": (0, 4),       # 00:00-04:00 UTC — Singapore/HK, significant crypto volume
-        "LONDON": (7, 11),    # 07:00-11:00 UTC — institutional liquidity
-        "NY": (13, 17),       # 13:00-17:00 UTC — US session
+        "LONDON": (7, 9),     # 07:00-09:00 UTC — per user standing instructions
+        "NY": (13, 15),       # 13:00-15:00 UTC — per user standing instructions
         "LATE": (21, 23),     # 21:00-23:00 UTC — late NY/early Asia overlap
     }
 
     # Off-hours: allow trading with higher confidence threshold
-    OFF_HOURS_CONFIDENCE = 70  # Need 70%+ to trade outside sessions
+    OFF_HOURS_CONFIDENCE = 999  # Effectively disabled — no off-hours trading per user instructions
 
     # Confidence threshold drops as hunger increases
     BASE_CONFIDENCE = 55  # Start lower — take more trades
@@ -91,7 +91,7 @@ class GroqTrader:
 
         # Off-hours: allow trading with higher confidence bar
         # A hungry scalper doesn't sit on their hands when there's an edge
-        return "OFF_HOURS", True, 0.0  # Changed: now active but with higher confidence requirement
+        return "OFF_HOURS", False, 0.0  # No trading outside London/NY per user instructions
 
     def _load_recent_trades(self, limit: int = 15) -> list[dict]:
         """Load recent closed trades for learning."""
