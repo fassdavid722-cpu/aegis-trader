@@ -189,6 +189,94 @@ class GroqTrader:
             return "No lessons learned yet."
         return "\n".join(f"  • {l}" for l in lessons)
 
+
+    def _build_pattern_insights(self) -> str:
+        """Generate data-driven insights from trade history. These are FACTS, not opinions."""
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT direction, result, actual_r, exit_reason, market_regime
+            FROM trades WHERE status='CLOSED'
+            ORDER BY closed_at DESC LIMIT 20
+        """).fetchall()
+        conn.close()
+
+        if len(rows) < 3:
+            return "Not enough trades for pattern analysis yet."
+
+        longs = [r for r in rows if r["direction"] == "LONG"]
+        shorts = [r for r in rows if r["direction"] == "SHORT"]
+        long_wins = [r for r in longs if r["result"] == "WIN"]
+        short_wins = [r for r in shorts if r["result"] == "WIN"]
+        long_r = sum(r["actual_r"] or 0 for r in longs)
+        short_r = sum(r["actual_r"] or 0 for r in shorts)
+
+        insights = []
+
+        # Direction bias
+        if len(longs) >= 2:
+            lr = len(long_wins) / len(longs) * 100
+            insights.append(f"LONGS: {len(long_wins)}/{len(longs)} wins ({lr:.0f}% WR), {long_r:+.1f}R total")
+        if len(shorts) >= 2:
+            sr = len(short_wins) / len(shorts) * 100
+            insights.append(f"SHORTS: {len(short_wins)}/{len(shorts)} wins ({sr:.0f}% WR), {short_r:+.1f}R total")
+
+        # Strong directional bias warning
+        if len(shorts) >= 3 and len(short_wins) == 0:
+            insights.append("🚨 CRITICAL: 0% win rate on shorts. STOP shorting unless overwhelming bearish evidence.")
+        if len(longs) >= 3 and len(long_wins) == 0:
+            insights.append("🚨 CRITICAL: 0% win rate on longs. STOP going long unless overwhelming bullish evidence.")
+
+        if len(shorts) >= 3 and len(short_wins) / len(shorts) < 0.3 and len(longs) >= 2 and len(long_wins) / len(longs) > 0.5:
+            insights.append("📊 PATTERN: Longs are profitable, shorts are bleeding. BIAS TO LONG unless strong bearish regime.")
+
+        if len(longs) >= 3 and len(long_wins) / len(longs) < 0.3 and len(shorts) >= 2 and len(short_wins) / len(shorts) > 0.5:
+            insights.append("📊 PATTERN: Shorts are profitable, longs are bleeding. BIAS TO SHORT unless strong bullish regime.")
+
+        # Streak detection
+        recent_5 = rows[:5]
+        recent_losses = sum(1 for r in recent_5 if r["result"] == "LOSS")
+        if recent_losses >= 4:
+            insights.append(f"⚠️ SLUMP: {recent_losses}/5 recent trades lost. Be more selective — only A+ setups.")
+
+        # Exit reason patterns
+        sl_hits = [r for r in rows if r["exit_reason"] == "SL_HIT"]
+        tp_hits = [r for r in rows if r["exit_reason"] == "TP_HIT"]
+        if len(sl_hits) > len(tp_hits) * 2:
+            insights.append(f"📐 SL hit {len(sl_hits)}x vs TP hit {len(tp_hits)}x. Your entries or SL placement is off.")
+
+        if not insights:
+            return "No strong patterns detected yet."
+
+        return "\n".join(f"  📌 {i}" for i in insights)
+
+
+    def _check_direction_bias(self, direction: str, confidence: int) -> str:
+        """Hard block on directions with terrible track records. Returns block reason or empty string."""
+        conn = self._get_conn()
+        rows = conn.execute("""
+            SELECT direction, result FROM trades
+            WHERE status='CLOSED' AND direction=?
+            ORDER BY closed_at DESC LIMIT 10
+        """, (direction,)).fetchall()
+        conn.close()
+
+        if len(rows) < 5:
+            return ""  # Not enough data to block
+
+        wins = sum(1 for r in rows if r["result"] == "WIN")
+        wr = wins / len(rows) * 100
+
+        # If 0% WR with 5+ trades and confidence < 80%, block it
+        if wr == 0 and confidence < 80:
+            return f"{direction} has 0% WR over {len(rows)} trades. Need 80%+ confidence to override."
+
+        # If <20% WR with 5+ trades and confidence < 70%, block it
+        if wr < 20 and confidence < 70:
+            return f"{direction} has {wr:.0f}% WR over {len(rows)} trades. Need 70%+ confidence to override."
+
+        return ""
+
+
     def _build_hunger_context(self, stats: dict, session: str, session_progress: float) -> str:
         """Build context about how hungry the trader should be."""
         today = stats["today_trades"]
@@ -279,11 +367,20 @@ YOUR TRACK RECORD:
 - Today: {stats['today_trades']} trades | Open: {stats['open_positions']}
 - Scalp win rate: {stats['scalp_win_rate']:.0f}% ({stats['scalp_total']} trades)
 
+DATA-DRIVEN INSIGHTS (these are FACTS from your trade history — obey them):
+{self._build_pattern_insights()}
+
 RECENT TRADES:
 {self._format_recent_trades(recent_trades)}
 
 LESSONS YOU'VE LEARNED:
 {self._format_lessons(lessons)}
+
+⚠️ ADAPTIVE RULES (based on your track record):
+- If your SHORT WR is below 30%, you need 75%+ confidence to take a short. No exceptions.
+- If your LONG WR is below 30%, you need 75%+ confidence to take a long. No exceptions.
+- If one direction is clearly winning and the other is losing, bias toward the winning direction.
+- These rules OVERRIDE your hunger. A hungry trader who keeps losing isn't hungry — they're reckless.
 
 OPEN POSITIONS:
 {open_pos_text}
@@ -426,6 +523,13 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
                 if not allowed:
                     print(f"[GroqTrader] {symbol}: BLOCKED by regime — {regime_reason}")
                     return None
+
+            # HARD BLOCK: Check direction bias from trade history
+            # If a direction has 0% WR with 5+ attempts, block it unless confidence is 80%+
+            bias_block = self._check_direction_bias(decision["direction"], decision["confidence"])
+            if bias_block:
+                print(f"[GroqTrader] {symbol}: BLOCKED by direction bias — {bias_block}")
+                return None
 
             mode = decision.get("mode", "SCALP")
             emoji = "🟢" if decision["direction"] == "LONG" else "🔴"
