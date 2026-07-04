@@ -188,6 +188,10 @@ class PaperEngine:
             "tp1": tp1,
             "tp2": tp2,
             "what_you_see": observation,
+            # AUDIT TRAIL — real tool values at decision time + which tools the LLM claims it used.
+            # This lets us verify after the fact whether "RSI oversold" etc. was actually true.
+            "tool_snapshot": decision.get("tool_snapshot", {}),
+            "tools_declared": decision.get("tools_used", []),
         }
 
         conn.execute("""

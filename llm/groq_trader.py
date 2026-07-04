@@ -472,8 +472,9 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
   "take_profit_2": <price>,
   "confidence": <int 50-95>,
   "risk_percent": <float 0.3-2.0>,
-  "reasoning": "<what edge you see, 2-3 sentences>",
-  "what_you_see": "<the specific price action pattern>",
+  "reasoning": "<MUST cite at least 2 SPECIFIC NUMBERS from the toolkit above by name — e.g. 'RSI 15m at 29 (oversold)', 'VWAP at 62743, price 0.44% below', 'taker ratio 2.02 buy-side', 'composite bias STRONG_LONG 7/10'. Do NOT just say 'momentum is building' or 'doji pattern' without a number attached. 2-3 sentences.>",
+  "what_you_see": "<the specific price action pattern, name it precisely>",
+  "tools_used": ["<list the 2-3 tool names that actually drove this decision, e.g. 'taker_flow', 'rsi_15m', 'composite_bias'>"],
   "invalidation": "<what would prove you wrong>"
 }}"""
 
@@ -524,6 +525,7 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
         prompt = self._build_prompt(
             intel, funding_rate, stats, recent, lessons,
             session, progress, open_positions or [], market_regime,
+            advanced_indicators, market_context, symbol_context,
         )
 
         try:
@@ -600,11 +602,35 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
                 print(f"[GroqTrader] {symbol}: BLOCKED by direction bias — {bias_block}")
                 return None
 
+            # AUDIT TRAIL: store the real tool values at decision time, so the
+            # LLM's claims (RSI oversold, taker buy-side, etc.) can be verified later
+            audit_snapshot = {}
+            if advanced_indicators is not None:
+                audit_snapshot["rsi_5m"] = round(advanced_indicators.rsi_5m, 1) if advanced_indicators.rsi_5m else None
+                audit_snapshot["rsi_15m"] = round(advanced_indicators.rsi_15m, 1) if advanced_indicators.rsi_15m else None
+                audit_snapshot["vwap"] = round(advanced_indicators.vwap, 4) if advanced_indicators.vwap else None
+                audit_snapshot["vwap_distance_pct"] = round(advanced_indicators.vwap_distance_pct, 3) if hasattr(advanced_indicators, "vwap_distance_pct") else None
+                audit_snapshot["ema_trend"] = getattr(advanced_indicators, "ema_trend", None)
+                audit_snapshot["bb_squeeze"] = getattr(advanced_indicators, "bb_squeeze", None)
+            if symbol_context is not None:
+                bias, strength = symbol_context.composite_bias
+                audit_snapshot["composite_bias"] = f"{bias} ({strength}/10)"
+                if symbol_context.long_short and symbol_context.long_short.taker:
+                    audit_snapshot["taker_ratio"] = round(symbol_context.long_short.taker.buy_sell_ratio, 2)
+                if symbol_context.orderbook:
+                    audit_snapshot["orderbook_imbalance"] = round(symbol_context.orderbook.imbalance, 3)
+            decision["tool_snapshot"] = audit_snapshot
+
+            # Cross-check: flag if the LLM's declared tools_used don't match what it actually cited
+            tools_used = decision.get("tools_used", [])
+            decision["_tools_declared"] = tools_used
+
             mode = decision.get("mode", "SCALP")
             emoji = "🟢" if decision["direction"] == "LONG" else "🔴"
             print(f"[GroqTrader] {symbol}: {emoji} {decision['direction']} {mode} "
                   f"@ {decision['entry']:.4f} conf={decision['confidence']}% "
-                  f"SL={decision['stop_loss']:.4f} TP1={decision['take_profit_1']:.4f}")
+                  f"SL={decision['stop_loss']:.4f} TP1={decision['take_profit_1']:.4f} "
+                  f"tools={tools_used}")
 
             return decision
 
