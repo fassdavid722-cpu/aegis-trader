@@ -2,6 +2,7 @@ name: Aegis Autonomous Trader
 
 on:
   schedule:
+    # Safety-net only — re-kicks the chain if it ever dies (every 6 hours).
     - cron: '0 */6 * * *'
   workflow_dispatch: {}
 
@@ -12,7 +13,7 @@ permissions:
 jobs:
   trade:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -32,15 +33,31 @@ jobs:
         run: |
           pip install httpx python-dotenv groq pydantic
 
-      - name: Run single trading cycle
+      - name: Run trading loop (~50 min, 5-min cycles)
         env:
+          BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
+          BITGET_SECRET_KEY: ${{ secrets.BITGET_SECRET_KEY }}
+          BITGET_PASSPHRASE: ${{ secrets.BITGET_PASSPHRASE }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python3 autonomous_trader.py 2>&1
+          END_TIME=$(( $(date +%s) + 48*60 ))
+          CYCLE=1
+          while [ "$(date +%s)" -lt "$END_TIME" ]; do
+            echo "=== Cycle $CYCLE — $(date -u +%H:%M:%S) UTC ==="
+            python3 autonomous_trader.py 2>&1 || echo "[loop] cycle failed, continuing"
+            CYCLE=$((CYCLE + 1))
+            # Sleep 5 minutes between cycles (but not after the last one)
+            REMAINING=$(( END_TIME - $(date +%s) ))
+            if [ "$REMAINING" -gt 300 ]; then
+              echo "Sleeping 300s until next cycle..."
+              sleep 300
+            fi
+          done
+          echo "Loop finished after $CYCLE cycles"
 
-      - name: Commit journal DB
+      - name: Commit journal DB (trade memory persistence)
         if: always()
         run: |
           git config user.name "Aegis Trader Bot"
@@ -48,15 +65,18 @@ jobs:
           git add data/journal.db 2>/dev/null || true
           if ! git diff --cached --quiet; then
             git commit -m "chore: persist journal DB [skip ci]"
-            git push
+            git push 2>&1 || echo "push failed (concurrent run?), will retry next cycle"
+          else
+            echo "No DB changes to commit"
           fi
 
-      - name: Re-trigger self
+      - name: Re-trigger self to keep the chain alive
         if: always()
         run: |
-          sleep 5
+          sleep 10
           curl -s -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/aegis-trader.yml/dispatches" \
             -d '{"ref":"main"}'
+          echo "Self-retriggered ✅"
