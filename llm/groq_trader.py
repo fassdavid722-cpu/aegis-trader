@@ -36,11 +36,16 @@ class GroqTrader:
 
     MODEL = "llama-3.3-70b-versatile"
 
-    # Wider session windows for scalping
+    # Session windows — crypto trades 24/7, but liquidity varies
     SESSIONS = {
-        "LONDON": (7, 11),     # 07:00-11:00 UTC
-        "NY": (13, 17),        # 13:00-17:00 UTC
+        "ASIA": (0, 4),       # 00:00-04:00 UTC — Singapore/HK, significant crypto volume
+        "LONDON": (7, 11),    # 07:00-11:00 UTC — institutional liquidity
+        "NY": (13, 17),       # 13:00-17:00 UTC — US session
+        "LATE": (21, 23),     # 21:00-23:00 UTC — late NY/early Asia overlap
     }
+
+    # Off-hours: allow trading with higher confidence threshold
+    OFF_HOURS_CONFIDENCE = 70  # Need 70%+ to trade outside sessions
 
     # Confidence threshold drops as hunger increases
     BASE_CONFIDENCE = 55  # Start lower — take more trades
@@ -66,16 +71,27 @@ class GroqTrader:
         return conn
 
     def get_session(self) -> tuple[str, bool, float]:
-        """Returns (session_name, is_active, progress 0-1)."""
+        """Returns (session_name, is_active, progress 0-1).
+        
+        Crypto trades 24/7. During sessions, normal confidence threshold.
+        Off-hours: still active but requires higher confidence (70%+).
+        """
         hour = datetime.now(timezone.utc)
         h = hour.hour
         m = hour.minute
+        weekday = hour.weekday()  # 0=Monday, 6=Sunday
 
         for name, (start, end) in self.SESSIONS.items():
             if start <= h < end:
                 progress = (h - start + m / 60) / (end - start)
+                # Weekend sessions are active but flagged
+                if weekday >= 5:
+                    return f"{name}_WEEKEND", True, progress
                 return name, True, progress
-        return "OFF_HOURS", False, 0.0
+
+        # Off-hours: allow trading with higher confidence bar
+        # A hungry scalper doesn't sit on their hands when there's an edge
+        return "OFF_HOURS", True, 0.0  # Changed: now active but with higher confidence requirement
 
     def _load_recent_trades(self, limit: int = 15) -> list[dict]:
         """Load recent closed trades for learning."""
@@ -413,20 +429,31 @@ OPEN POSITIONS:
 {open_pos_text}
 
 YOUR TRADER TOOLKIT — use ALL of these:
-1. ADVANCED INDICATORS: VWAP tells you fair value. RSI tells you overbought/oversold. 
-   EMA alignment confirms trend. Bollinger Bands show volatility squeeze (breakout coming).
-   Volume Profile shows where real money is positioned (POC = strongest level).
-2. ORDER FLOW: Order book imbalance shows real buy/sell pressure. 
-   Taker buy/sell ratio shows aggressive market orders (smart money footprints).
-   L/S ratio shows crowded positioning (contrarian signals).
-3. MARKET CONTEXT: BTC trend moves ALL alts. If BTC is dumping, don't long alts.
-   Market breadth tells you if it's risk-on or risk-off.
-4. PRICE ACTION: Momentum, patterns, structure breaks, session context.
-5. YOUR TRACK RECORD: Your own history. If shorts keep losing, stop shorting.
+0. COMPOSITE BIAS (HEADLINE): The ⚡ COMPOSITE BIAS score combines order book + 
+   taker flow + L/S ratio into one score. STRONG_LONG = look for longs. 
+   STRONG_SHORT = look for shorts. NEUTRAL = wait or require high confidence.
+   This is your fastest read on market direction. FOLLOW IT.
+1. TAKER FLOW (PRIMARY SIGNAL): Taker buy/sell ratio shows what aggressive traders 
+   are actually doing RIGHT NOW. Buy ratio > 1.3 = strong buying pressure. 
+   Sell ratio > 1.3 = strong selling. This is the MOST reliable real-time signal.
+   If taker flow says BUY_SIDE and you're thinking short, you're fighting the tape.
+2. ORDER BOOK: Imbalance > +0.3 = buy walls. < -0.3 = sell walls.
+3. ADVANCED INDICATORS: VWAP = fair value. RSI = overbought/oversold. 
+   EMA = trend direction. BB squeeze = breakout imminent. VolProfile = where money is.
+4. MARKET CONTEXT: BTC moves ALL alts. Don't fight BTC. Breadth = risk-on/off.
+5. PRICE ACTION: Momentum, patterns, structure breaks.
+6. YOUR TRACK RECORD: Your own history is the TRUTH. 100% long WR, 0% short WR = 
+   BIAS TO LONG. Period. Don't argue with your own data.
 
 CONFLUENCE RULE: The best trades have 3+ tools pointing the same direction.
-Example: VWAP below price + RSI oversold + taker BUY_SIDE + EMA bullish = strong long.
-If tools disagree, be cautious or skip.
+GOLDEN SETUP: Taker BUY_SIDE + RSI oversold + VWAP below price + BB squeeze = 
+  Long with confidence. Price is oversold but buyers are aggressively entering.
+DEATH SETUP: Taker SELL_SIDE + RSI overbought + VWAP above price + crowded longs =
+  Short candidate (but only if your short WR justifies it).
+
+⚠️ DIRECTION BIAS: Your track record shows 100% WR on longs, 0% on shorts.
+Unless you have OVERWHELMING bearish evidence (3+ tools screaming short), GO LONG.
+This isn't cowardice — it's data-driven trading.
 
 {regime_briefing}
 

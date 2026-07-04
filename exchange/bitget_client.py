@@ -260,17 +260,13 @@ class BitgetMarketClient:
             d = r.json()
             if d.get("code") != "00000":
                 return None
-            # OI data may be a dict (not a list) in some responses
-            data = d.get("data", [])
-            if isinstance(data, list):
-                data = data[0] if data else {}
-            elif isinstance(data, dict):
-                pass
-            else:
+            # OI data format: {"openInterestList": [{"symbol": "BTCUSDT", "size": "35035.0873"}], "ts": "..."}
+            data = d.get("data", {})
+            oi_list = data.get("openInterestList", []) if isinstance(data, dict) else []
+            if not oi_list:
                 return None
-            if not data:
-                return None
-            oi = float(data.get("amount", data.get("oi", 0)))
+            item = oi_list[0]
+            oi = float(item.get("size", 0))
             return OpenInterestData(
                 symbol=symbol,
                 current_oi=oi,

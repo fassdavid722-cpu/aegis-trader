@@ -67,28 +67,96 @@ class SymbolContext:
         
         return base
 
+    @property
+    def composite_bias(self) -> tuple[str, int]:
+        """Combine all order flow signals into a single directional bias.
+        
+        Returns (bias, strength 0-10):
+        - STRONG_LONG: 7-10
+        - LONG: 4-6
+        - NEUTRAL: 0-3 (no edge)
+        - SHORT: 4-6
+        - STRONG_SHORT: 7-10
+        """
+        score = 0  # positive = long bias, negative = short bias
+
+        # Order book imbalance (max ±3)
+        if self.orderbook:
+            imb = self.orderbook.imbalance
+            if imb > 0.3:
+                score += 3
+            elif imb > 0.1:
+                score += 1
+            elif imb < -0.3:
+                score -= 3
+            elif imb < -0.1:
+                score -= 1
+
+        # Taker flow (max ±4) — most important
+        if self.long_short and self.long_short.taker:
+            ratio = self.long_short.taker.buy_sell_ratio
+            if ratio > 1.5:
+                score += 4
+            elif ratio > 1.2:
+                score += 2
+            elif ratio < 0.67:
+                score -= 4
+            elif ratio < 0.83:
+                score -= 2
+
+        # L/S ratio — contrarian signal (max ±2)
+        if self.long_short:
+            ls = self.long_short.long_short_ratio
+            if ls > 2.0:
+                score -= 2  # Too many longs → squeeze risk
+            elif ls > 1.5:
+                score -= 1
+            elif ls < 0.5:
+                score += 2  # Too many shorts → short squeeze risk
+            elif ls < 0.7:
+                score += 1
+
+        # Convert to bias + strength
+        abs_score = abs(score)
+        strength = min(abs_score, 10)
+
+        if score >= 7:
+            return "STRONG_LONG", strength
+        elif score >= 4:
+            return "LONG", strength
+        elif score <= -7:
+            return "STRONG_SHORT", strength
+        elif score <= -4:
+            return "SHORT", strength
+        return "NEUTRAL", strength
+
     def to_briefing(self) -> str:
         lines = []
+
+        # Composite bias first — this is the headline
+        bias, strength = self.composite_bias
+        lines.append(f"⚡ COMPOSITE BIAS: {bias} ({strength}/10)")
+
         if self.orderbook:
             imb = self.orderbook.imbalance
             lines.append(
-                f"OrderBook: {self.orderbook.pressure} (imbalance {imb:+.2f}) "
+                f"  OrderBook: {self.orderbook.pressure} (imbalance {imb:+.2f}) "
                 f"| Bid vol {self.orderbook.bid_volume:.0f} vs Ask vol {self.orderbook.ask_volume:.0f}"
             )
         if self.long_short:
             ls = self.long_short
             lines.append(
-                f"L/S Ratio: {ls.long_short_ratio:.2f} ({self.positioning}) "
+                f"  L/S Ratio: {ls.long_short_ratio:.2f} ({self.positioning}) "
                 f"| Longs {ls.long_ratio*100:.0f}% Shorts {ls.short_ratio*100:.0f}%"
             )
             if ls.taker:
                 t = ls.taker
                 lines.append(
-                    f"Taker Flow: {t.pressure} (buy {t.buy_volume:.1f} vs sell {t.sell_volume:.1f}, ratio {t.buy_sell_ratio:.2f})"
+                    f"  Taker Flow: {t.pressure} (buy {t.buy_volume:.1f} vs sell {t.sell_volume:.1f}, ratio {t.buy_sell_ratio:.2f})"
                 )
         if self.open_interest and self.open_interest.oi_value_usdt > 0:
             lines.append(
-                f"Open Interest: ${self.open_interest.oi_value_usdt:,.0f}"
+                f"  Open Interest: ${self.open_interest.oi_value_usdt:,.0f}"
             )
         return "\n".join(lines) if lines else "No order flow data"
 
