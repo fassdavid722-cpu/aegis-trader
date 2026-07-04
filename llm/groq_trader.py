@@ -366,16 +366,9 @@ class GroqTrader:
         scalp_sl_pct = (atr_sl_scalp / intel.current_price) * 100
         swing_sl_pct = (atr_sl_swing / intel.current_price) * 100
 
-        return f"""You are Aegis — a hungry, elite crypto scalper on Bitget futures.
-
-YOU ARE A TRADER, NOT AN ANALYST.
-- You make your living scalping. Sitting out all session = you don't eat.
-- You take trades with 55%+ edge. You don't wait for 90% setups — they don't exist.
-- You hunt momentum bursts, volume surges, level reactions, and structure breaks.
-- You manage risk on every trade but you ACT when edge appears.
-- Missing a good trade bothers you MORE than a small loss.
-- You scalp primarily (5-30 min holds). On rare high-conviction setups, you swing.
-- Every loss is a lesson. Every win confirms your read. You get sharper all session.
+        return f"""You are Aegis — an elite crypto scalper on Bitget futures.
+Take trades with 55%+ edge. Scalp (5-30 min holds), swing only on high-conviction.
+ACT when edge appears. Missing a good trade is worse than a small loss.
 
 SCALPING PARAMETERS:
 - SL: {scalp_sl_pct:.3f}% ({atr_sl_scalp:.4f} — 1.2x ATR)
@@ -419,43 +412,14 @@ RECENT TRADES:
 LESSONS YOU'VE LEARNED:
 {self._format_lessons(lessons)}
 
-⚠️ ADAPTIVE RULES (based on your track record):
-- If your SHORT WR is below 30%, you need 75%+ confidence to take a short. No exceptions.
-- If your LONG WR is below 30%, you need 75%+ confidence to take a long. No exceptions.
-- If one direction is clearly winning and the other is losing, bias toward the winning direction.
-- These rules OVERRIDE your hunger. A hungry trader who keeps losing isn't hungry — they're reckless.
-
 OPEN POSITIONS:
 {open_pos_text}
 
-YOUR TRADER TOOLKIT — use ALL of these:
-0. COMPOSITE BIAS (HEADLINE): The ⚡ COMPOSITE BIAS score combines order book + 
-   taker flow + L/S ratio into one score. STRONG_LONG = look for longs. 
-   STRONG_SHORT = look for shorts. NEUTRAL = wait or require high confidence.
-   This is your fastest read on market direction. FOLLOW IT.
-1. TAKER FLOW (PRIMARY SIGNAL): Taker buy/sell ratio shows what aggressive traders 
-   are actually doing RIGHT NOW. Buy ratio > 1.3 = strong buying pressure. 
-   Sell ratio > 1.3 = strong selling. This is the MOST reliable real-time signal.
-   If taker flow says BUY_SIDE and you're thinking short, you're fighting the tape.
-2. ORDER BOOK: Imbalance > +0.3 = buy walls. < -0.3 = sell walls.
-3. ADVANCED INDICATORS: VWAP = fair value. RSI = overbought/oversold. 
-   EMA = trend direction. BB squeeze = breakout imminent. VolProfile = where money is.
-4. MARKET CONTEXT: BTC moves ALL alts. Don't fight BTC. Breadth = risk-on/off.
-5. PRICE ACTION: Momentum, patterns, structure breaks.
-6. YOUR TRACK RECORD: Your own history is the TRUTH. 100% long WR, 0% short WR = 
-   BIAS TO LONG. Period. Don't argue with your own data.
-
-CONFLUENCE RULE: The best trades have 3+ tools pointing the same direction.
-GOLDEN SETUP: Taker BUY_SIDE + RSI oversold + VWAP below price + BB squeeze = 
-  Long with confidence. Price is oversold but buyers are aggressively entering.
-DEATH SETUP: Taker SELL_SIDE + RSI overbought + VWAP above price + crowded longs =
-  Short candidate (but only if your short WR justifies it).
-
-⚠️ DIRECTION BIAS: Previous trade history was computed on a data bug (reversed 
-candles) and is NOT reliable. Treat direction neutrally — go LONG or SHORT based 
-on what the CURRENT indicators actually show. Taker ratio >1.5 = buyers aggressive 
-(LONG lean). Taker ratio <0.67 = sellers aggressive (SHORT lean). Composite bias 
-STRONG_SHORT = look for shorts. Trust the tools, not old results.
+RULES:
+- Taker ratio >1.3 = buyers aggressive (LONG lean). <0.77 = sellers aggressive (SHORT lean).
+- Composite bias STRONG_SHORT = look for shorts. STRONG_LONG = look for longs.
+- Best trades: 3+ tools agreeing. Don't fight taker flow.
+- Previous trade history was on a data bug — treat direction neutrally.
 
 {regime_briefing}
 
@@ -515,13 +479,17 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
             session_progress=progress,
         )
 
-        # Quick filter: if signal strength is 0 and volume is dry, skip the LLM call
-        if intel.signal_strength == 0 and intel.volume_status == "DRY":
-            print(f"[GroqTrader] {symbol}: No signals + dry volume — skip LLM call")
+        # AGGRESSIVE pre-filter: save Groq tokens — only call LLM when there's real signal
+        # Skip if no signal OR low signal + normal volume (not worth the tokens)
+        if intel.signal_strength == 0:
+            print(f"[GroqTrader] {symbol}: No signal — skip LLM call (save tokens)")
+            return None
+        if intel.signal_strength <= 1 and intel.volume_status in ("DRY", "NORMAL"):
+            print(f"[GroqTrader] {symbol}: Weak signal + no volume surge — skip")
             return None
 
         stats = self._load_stats()
-        recent = self._load_recent_trades(15)
+        recent = self._load_recent_trades(5)
         lessons = self._load_lessons()
 
         prompt = self._build_prompt(

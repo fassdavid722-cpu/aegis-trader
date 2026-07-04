@@ -178,7 +178,7 @@ async def run_cycle() -> dict:
     # 3. Scan for new trades (only in active session)
     new_trades = []
     if is_active:
-        print(f"[Hunt] Scanning {len(SYMBOLS)} symbols for setups...")
+        print(f"[Hunt] Scanning for setups...")
 
         # Market regime check — top-down approach
         from analyst.regime_detector_v2 import detect_regime
@@ -234,12 +234,21 @@ async def run_cycle() -> dict:
             print(f"[Market] Context fetch failed: {e}")
             market_ctx = None
 
-        for symbol in SYMBOLS:
-            if symbol in open_symbols:
-                continue
+        # Rotate 2 symbols per cycle to stay within Groq's 100k daily token budget
+        import time as _time
+        cycle_idx = int(_time.time() // 300)  # changes every 5-min cycle
+        n_scan = 2
+        scan_list = [SYMBOLS[(cycle_idx * n_scan + i) % len(SYMBOLS)] for i in range(n_scan)]
+        # Always include symbols with open positions for monitoring
+        scan_list = list(set(scan_list + list(open_symbols)))
+        print(f"[Hunt] Scanning {len(scan_list)} symbols: {', '.join(scan_list)}")
 
-            # Small delay between symbols to avoid Groq rate limiting (12k TPM)
-            if symbol != SYMBOLS[0]:
+        for symbol in scan_list:
+            if symbol in open_symbols and symbol not in scan_list[:n_scan]:
+                continue  # monitor open positions but don't re-scan for new entries
+
+            # Small delay between symbols to avoid Groq rate limiting
+            if symbol != scan_list[0]:
                 await asyncio.sleep(5)
 
             try:
