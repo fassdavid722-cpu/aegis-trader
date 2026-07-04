@@ -173,7 +173,7 @@ class BitgetMarketClient:
                 return []
             raw = d.get("data", [])
             normalized = normalize_candles(raw)
-            return list(reversed(normalized))  # oldest → newest
+            return normalized  # API already returns oldest → newest
         except Exception as e:
             print(f"Candles error {symbol}/{granularity}: {e}")
             return []

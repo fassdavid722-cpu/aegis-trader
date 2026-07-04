@@ -54,8 +54,14 @@ def send_telegram(text: str) -> None:
 
 # ── Market data ────────────────────────────────────────────────────
 async def fetch_market_data(symbol: str, client=None) -> dict:
-    """Fetch 5min + 15min candles + funding + order book + L/S ratio + taker flow."""
+    """Fetch 5min + 15min candles + funding + order book + L/S ratio + taker flow.
+
+    CRITICAL: Drops the last (still-forming) candle from both timeframes.
+    The LLM and all indicators only see CLOSED candles — no look-ahead bias.
+    Real-time price comes from the ticker, not a forming candle.
+    """
     from exchange.bitget_client import BitgetMarketClient
+    from datetime import datetime, timezone
     own_client = client is None
     if own_client:
         client = BitgetMarketClient()
@@ -69,6 +75,34 @@ async def fetch_market_data(symbol: str, client=None) -> dict:
     finally:
         if own_client:
             await client.close()
+
+    # Drop forming candles — only feed CLOSED candles to the LLM/indicators.
+    # The last candle is typically still forming (mid-period). Including it
+    # gives the LLM a sneak peek at recent price action, making it describe
+    # the past instead of predict the future. This is look-ahead bias.
+    now = datetime.now(timezone.utc)
+    if candles_5m and len(candles_5m) > 1:
+        last_ts = candles_5m[-1].get("timestamp")
+        if isinstance(last_ts, str):
+            age_s = (now - datetime.fromisoformat(last_ts)).total_seconds()
+        elif isinstance(last_ts, (int, float)):
+            age_s = (now.timestamp() - last_ts / 1000)
+        else:
+            age_s = 999
+        if age_s < 300:  # 5m candle still forming
+            candles_5m = candles_5m[:-1]
+
+    if candles_15m and len(candles_15m) > 1:
+        last_ts = candles_15m[-1].get("timestamp")
+        if isinstance(last_ts, str):
+            age_s = (now - datetime.fromisoformat(last_ts)).total_seconds()
+        elif isinstance(last_ts, (int, float)):
+            age_s = (now.timestamp() - last_ts / 1000)
+        else:
+            age_s = 999
+        if age_s < 900:  # 15m candle still forming
+            candles_15m = candles_15m[:-1]
+
     return {
         "symbol": symbol,
         "ticker": ticker,

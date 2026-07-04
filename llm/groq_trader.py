@@ -451,9 +451,11 @@ GOLDEN SETUP: Taker BUY_SIDE + RSI oversold + VWAP below price + BB squeeze =
 DEATH SETUP: Taker SELL_SIDE + RSI overbought + VWAP above price + crowded longs =
   Short candidate (but only if your short WR justifies it).
 
-⚠️ DIRECTION BIAS: Your track record shows 100% WR on longs, 0% on shorts.
-Unless you have OVERWHELMING bearish evidence (3+ tools screaming short), GO LONG.
-This isn't cowardice — it's data-driven trading.
+⚠️ DIRECTION BIAS: Previous trade history was computed on a data bug (reversed 
+candles) and is NOT reliable. Treat direction neutrally — go LONG or SHORT based 
+on what the CURRENT indicators actually show. Taker ratio >1.5 = buyers aggressive 
+(LONG lean). Taker ratio <0.67 = sellers aggressive (SHORT lean). Composite bias 
+STRONG_SHORT = look for shorts. Trust the tools, not old results.
 
 {regime_briefing}
 
@@ -595,12 +597,13 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
                     print(f"[GroqTrader] {symbol}: BLOCKED by regime — {regime_reason}")
                     return None
 
-            # HARD BLOCK: Check direction bias from trade history
-            # If a direction has 0% WR with 5+ attempts, block it unless confidence is 80%+
-            bias_block = self._check_direction_bias(decision["direction"], decision["confidence"])
-            if bias_block:
-                print(f"[GroqTrader] {symbol}: BLOCKED by direction bias — {bias_block}")
-                return None
+            # DIRECTION BIAS CHECK — disabled until we have 20+ trades on CORRECT data
+            # Previous trades were on reversed candle data (bug fixed 2026-07-04).
+            # Re-enable after accumulating clean data.
+            # bias_block = self._check_direction_bias(decision["direction"], decision["confidence"])
+            # if bias_block:
+            #     print(f"[GroqTrader] {symbol}: BLOCKED by direction bias — {bias_block}")
+            #     return None
 
             # AUDIT TRAIL: store the real tool values at decision time, so the
             # LLM's claims (RSI oversold, taker buy-side, etc.) can be verified later
