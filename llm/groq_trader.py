@@ -282,13 +282,13 @@ class GroqTrader:
         wins = sum(1 for r in rows if r["result"] == "WIN")
         wr = wins / len(rows) * 100
 
-        # If 0% WR with 5+ trades and confidence < 80%, block it
-        if wr == 0 and confidence < 80:
-            return f"{direction} has 0% WR over {len(rows)} trades. Need 80%+ confidence to override."
+        # If 0% WR with 5+ trades and confidence < 95%, block it (essentially permanent)
+        if wr == 0 and confidence < 95:
+            return f"{direction} has 0% WR over {len(rows)} trades. Direction is broken — blocked."
 
-        # If <20% WR with 5+ trades and confidence < 70%, block it
-        if wr < 20 and confidence < 70:
-            return f"{direction} has {wr:.0f}% WR over {len(rows)} trades. Need 70%+ confidence to override."
+        # If <20% WR with 5+ trades and confidence < 85%, block it
+        if wr < 20 and confidence < 85:
+            return f"{direction} has {wr:.0f}% WR over {len(rows)} trades. Need 85%+ confidence to override."
 
         return ""
 
@@ -419,7 +419,6 @@ RULES:
 - Taker ratio >1.3 = buyers aggressive (LONG lean). <0.77 = sellers aggressive (SHORT lean).
 - Composite bias STRONG_SHORT = look for shorts. STRONG_LONG = look for longs.
 - Best trades: 3+ tools agreeing. Don't fight taker flow.
-- Previous trade history was on a data bug — treat direction neutrally.
 
 {regime_briefing}
 
@@ -565,13 +564,13 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
                     print(f"[GroqTrader] {symbol}: BLOCKED by regime — {regime_reason}")
                     return None
 
-            # DIRECTION BIAS CHECK — disabled until we have 20+ trades on CORRECT data
-            # Previous trades were on reversed candle data (bug fixed 2026-07-04).
+            # DIRECTION BIAS CHECK — Active as of 2026-07-06 (18 trades of clean data)
+            # direction bias check re-enabled 2026-07-06
             # Re-enable after accumulating clean data.
-            # bias_block = self._check_direction_bias(decision["direction"], decision["confidence"])
-            # if bias_block:
-            #     print(f"[GroqTrader] {symbol}: BLOCKED by direction bias — {bias_block}")
-            #     return None
+            bias_block = self._check_direction_bias(decision["direction"], decision["confidence"])
+            if bias_block:
+                print(f"[GroqTrader] {symbol}: BLOCKED by direction bias — {bias_block}")
+                return None
 
             # AUDIT TRAIL: store the real tool values at decision time, so the
             # LLM's claims (RSI oversold, taker buy-side, etc.) can be verified later

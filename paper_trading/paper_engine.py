@@ -31,8 +31,10 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6472746064")
 STARTING_BALANCE = 10_000.0
 SLIPPAGE_BPS = 2  # 0.02% simulated slippage
 TRADING_FEE_BPS = 6  # 0.06% taker fee (Bitget)
-MAX_DAILY_TRADES = 10  # Scalpers take more trades
-DAILY_LOSS_LIMIT = -5.0  # -5% daily loss limit (wider for scalping)
+MAX_DAILY_TRADES = 5  # Scalpers take more trades
+DAILY_LOSS_LIMIT = -3.0  # -3% daily loss limit (tightened 2026-07-06)
+MAX_CONSECUTIVE_LOSSES = 3  # Circuit breaker: pause after N consecutive SL hits
+CONSECUTIVE_LOSS_COOLDOWN = 30  # Minutes to pause after hitting max consecutive losses
 LIVE_GATE_MIN_TRADES = 50  # Need 50 demo trades before going live
 LIVE_GATE_MIN_WIN_RATE = 52.0  # Need >52% win rate to go live
 
@@ -137,6 +139,24 @@ class PaperEngine:
         if self._daily_pnl() <= DAILY_LOSS_LIMIT:
             print(f"[Paper] Daily loss limit hit ({DAILY_LOSS_LIMIT}%)")
             return None
+
+        # CONSECUTIVE LOSS CIRCUIT BREAKER
+        consec = self._consecutive_sl_losses()
+        if consec >= MAX_CONSECUTIVE_LOSSES:
+            last_time = self._last_loss_time()
+            if last_time:
+                from datetime import timedelta
+                try:
+                    lt = datetime.fromisoformat(last_time.replace("Z", "+00:00"))
+                    elapsed = (datetime.now(timezone.utc) - lt).total_seconds() / 60
+                    if elapsed < CONSECUTIVE_LOSS_COOLDOWN:
+                        remaining = CONSECUTIVE_LOSS_COOLDOWN - elapsed
+                        msg = f"⏸️ CIRCUIT BREAKER: {consec} consecutive SL losses. Cooling down for {remaining:.0f}min"
+                        print(f"[Paper] {msg}")
+                        send_telegram(msg)
+                        return None
+                except Exception:
+                    pass
 
         # Check for duplicate
         if self._is_already_open(decision["symbol"], decision["direction"]):
@@ -473,6 +493,30 @@ class PaperEngine:
             "pnl": pnl,
             "pnl_percent": pnl_percent,
         }
+
+    def _consecutive_sl_losses(self) -> int:
+        """Count consecutive SL_HIT losses (most recent first)."""
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT exit_reason, result FROM trades WHERE status='CLOSED' ORDER BY closed_at DESC LIMIT 20"
+        ).fetchall()
+        conn.close()
+        count = 0
+        for r in rows:
+            if r["exit_reason"] == "SL_HIT" and r["result"] == "LOSS":
+                count += 1
+            else:
+                break
+        return count
+
+    def _last_loss_time(self) -> Optional[str]:
+        """Get timestamp of the most recent SL loss."""
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT closed_at FROM trades WHERE status='CLOSED' AND exit_reason='SL_HIT' ORDER BY closed_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        return row[0] if row else None
 
     def _trades_today(self) -> int:
         conn = _get_conn()
