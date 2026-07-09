@@ -63,3 +63,5 @@ jobs:
           else
             echo "No DB changes to commit"
           fi
+
+# Re-enabled schedule: 2026-07-09T09:03:03.411611Z
