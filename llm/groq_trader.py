@@ -478,13 +478,11 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
             session_progress=progress,
         )
 
-        # AGGRESSIVE pre-filter: save Groq tokens — only call LLM when there's real signal
-        # Skip if no signal OR low signal + normal volume (not worth the tokens)
-        if intel.signal_strength == 0:
-            print(f"[GroqTrader] {symbol}: No signal — skip LLM call (save tokens)")
-            return None
-        if intel.signal_strength <= 1 and intel.volume_status in ("DRY", "NORMAL"):
-            print(f"[GroqTrader] {symbol}: Weak signal + no volume surge — skip")
+        # Pre-filter: save Groq tokens — skip only when there's truly nothing cooking
+        # Loosened 2026-07-16: was blocking ALL LLM calls when signal_strength=0,
+        # meaning the bot never traded. Now only skip when signal=0 AND volume is dry.
+        if intel.signal_strength == 0 and intel.volume_status in ("DRY", "NORMAL"):
+            print(f"[GroqTrader] {symbol}: No signal + dry volume — skip LLM call (save tokens)")
             return None
 
         stats = self._load_stats()
@@ -576,8 +574,8 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
             # LLM's claims (RSI oversold, taker buy-side, etc.) can be verified later
             audit_snapshot = {}
             if advanced_indicators is not None:
-                audit_snapshot["rsi_5m"] = round(advanced_indicators.rsi_5m, 1) if advanced_indicators.rsi_5m else None
-                audit_snapshot["rsi_15m"] = round(advanced_indicators.rsi_15m, 1) if advanced_indicators.rsi_15m else None
+                audit_snapshot["rsi_5m"] = round(advanced_indicators.rsi_5m.rsi, 1) if advanced_indicators.rsi_5m else None
+                audit_snapshot["rsi_15m"] = round(advanced_indicators.rsi_15m.rsi, 1) if advanced_indicators.rsi_15m else None
                 audit_snapshot["vwap"] = round(advanced_indicators.vwap, 4) if advanced_indicators.vwap else None
                 audit_snapshot["vwap_distance_pct"] = round(advanced_indicators.vwap_distance_pct, 3) if hasattr(advanced_indicators, "vwap_distance_pct") else None
                 audit_snapshot["ema_trend"] = getattr(advanced_indicators, "ema_trend", None)
