@@ -63,4 +63,4 @@ jobs:
           else
             echo "No DB changes to commit"
           fi
-# Mid-week heartbeat check — 2026-07-09
+# Mid-week heartbeat check — 2026-07-09 (schedule re-enabled)
