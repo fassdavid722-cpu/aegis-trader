@@ -52,6 +52,83 @@ def send_telegram(text: str) -> None:
         print(f"[Telegram] {e}")
 
 
+
+
+# ── Trade-drought detector ──────────────────────────────────────────
+# Alert via Telegram if no trade has closed in DROUGHT_DAYS, so a silent
+# "no trades for weeks" failure mode (like Jul 3-20, 2026) can't go unnoticed.
+# Throttled to one alert per day via the paper_config table.
+DROUGHT_DAYS = 7
+
+def check_trade_drought() -> None:
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        # last closed trade timestamp
+        row = c.execute(
+            "SELECT MAX(closed_at) FROM trades WHERE status='CLOSED'"
+        ).fetchone()
+        last_close = row[0] if row else None
+        # last alert time (throttle)
+        last_alert_row = c.execute(
+            "SELECT value FROM paper_config WHERE key='last_drought_alert'"
+        ).fetchone()
+        last_alert = last_alert_row[0] if last_alert_row else None
+        conn.close()
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+
+        # Determine days since last close (use created_date of trades table)
+        drought_days = None
+        if last_close:
+            try:
+                lc = datetime.fromisoformat(last_close.replace("Z", "+00:00"))
+                drought_days = (now - lc).days
+            except Exception:
+                drought_days = None
+
+        # Throttle: only alert once per 24h
+        alert_ok = True
+        if last_alert:
+            try:
+                la = datetime.fromisoformat(last_alert.replace("Z", "+00:00"))
+                if (now - la).total_seconds() < 86400:
+                    alert_ok = False
+            except Exception:
+                pass
+
+        if not alert_ok:
+            return
+
+        # Trigger if: no closed trades at all, OR drought >= DROUGHT_DAYS
+        trigger = (drought_days is None) or (drought_days >= DROUGHT_DAYS)
+        if not trigger:
+            return
+
+        desc = "no closed trades on record" if drought_days is None else f"{drought_days} days since last closed trade"
+        send_telegram(
+            f"⚠️ AEGIS DROUGHT ALERT\n\n"
+            f"The bot has not closed a trade in {desc}.\n"
+            f"This usually means a bug is blocking entries.\n"
+            f"Last close: {last_close or 'never'}\n\n"
+            f"Check the latest run logs for errors (RSI crash, pre-filter, LLM failures)."
+        )
+        # record alert time
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO paper_config(key, value) VALUES('last_drought_alert', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (now.isoformat(),),
+        )
+        conn.commit()
+        conn.close()
+        print(f"[Drought] Alert sent ({desc})")
+    except Exception as e:
+        print(f"[Drought] Check failed (non-fatal): {e}")
+
+
 # ── Market data ────────────────────────────────────────────────────
 async def fetch_market_data(symbol: str, client=None) -> dict:
     """Fetch 5min + 15min candles + funding + order book + L/S ratio + taker flow.
@@ -318,6 +395,9 @@ async def run_cycle() -> dict:
             f"Balance: ${stats['balance']:,.2f}\n"
             f"Trades to live: {stats['trades_to_live']}"
         )
+
+    # Trade-drought early warning
+    check_trade_drought()
 
     return {
         "session": session,
