@@ -576,8 +576,13 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
             if advanced_indicators is not None:
                 audit_snapshot["rsi_5m"] = round(advanced_indicators.rsi_5m.rsi, 1) if advanced_indicators.rsi_5m else None
                 audit_snapshot["rsi_15m"] = round(advanced_indicators.rsi_15m.rsi, 1) if advanced_indicators.rsi_15m else None
-                audit_snapshot["vwap"] = round(advanced_indicators.vwap, 4) if advanced_indicators.vwap else None
-                audit_snapshot["vwap_distance_pct"] = round(advanced_indicators.vwap_distance_pct, 3) if hasattr(advanced_indicators, "vwap_distance_pct") else None
+                # AdvancedIndicators.vwap is a VWAPData object, not a bare float.
+                # Keep the audit trail JSON-safe and preserve the derived distance.
+                vwap_data = advanced_indicators.vwap
+                audit_snapshot["vwap"] = round(vwap_data.vwap, 4) if vwap_data else None
+                audit_snapshot["vwap_distance_pct"] = (
+                    round(vwap_data.distance_pct, 3) if vwap_data else None
+                )
                 audit_snapshot["ema_trend"] = getattr(advanced_indicators, "ema_trend", None)
                 audit_snapshot["bb_squeeze"] = getattr(advanced_indicators, "bb_squeeze", None)
             if symbol_context is not None:
