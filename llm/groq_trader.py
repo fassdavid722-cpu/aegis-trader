@@ -50,6 +50,8 @@ class GroqTrader:
     # Confidence threshold drops as hunger increases
     BASE_CONFIDENCE = 55  # Start lower — take more trades
     HUNGER_CONFIDENCE_DROP = 10  # After 30 min no trades, threshold drops by 10
+    RECOVERY_CONFIDENCE_FLOOR = 70  # Selective mode while the training curve is below target
+    MIN_SCALP_REWARD_RISK = 1.5  # Offset fees/noise and the observed SL-heavy outcome
 
     def __init__(self) -> None:
         self.api_key = os.getenv("LLM_API_KEY", "")
@@ -266,6 +268,35 @@ class GroqTrader:
         return "\n".join(f"  📌 {i}" for i in insights)
 
 
+    def _quality_gate(self, decision: dict, stats: dict) -> str:
+        """Reject weak trades while paper performance is below the live gate.
+
+        This is intentionally conservative and reversible: once the closed-trade
+        sample is profitable and above the target WR, the normal confidence bar
+        applies again. The R:R floor protects scalps from fee/noise-dominated
+        entries; it is checked against the proposed full TP (TP2).
+        """
+        confidence = int(decision.get("confidence", self.BASE_CONFIDENCE))
+        closed = int(stats.get("total", 0))
+        win_rate = float(stats.get("win_rate", 0))
+        avg_r = float(stats.get("avg_r", 0))
+        if closed >= 5 and (win_rate < 52.0 or avg_r <= 0.0):
+            if confidence < self.RECOVERY_CONFIDENCE_FLOOR:
+                return (f"confidence {confidence}% below recovery floor "
+                        f"{self.RECOVERY_CONFIDENCE_FLOOR}% ({win_rate:.1f}% WR, {avg_r:.2f}R)")
+
+        if decision.get("mode", "SCALP") == "SCALP":
+            entry = float(decision.get("entry", 0) or 0)
+            stop = float(decision.get("stop_loss", 0) or 0)
+            target = float(decision.get("take_profit_2", 0) or 0)
+            risk = abs(entry - stop)
+            reward = abs(target - entry)
+            if risk <= 0 or reward / risk < self.MIN_SCALP_REWARD_RISK:
+                rr = reward / risk if risk > 0 else 0.0
+                return (f"scalp reward/risk {rr:.2f} below minimum "
+                        f"{self.MIN_SCALP_REWARD_RISK:.2f}")
+        return ""
+
     def _check_direction_bias(self, direction: str, confidence: int) -> str:
         """Hard block on directions with terrible track records. Returns block reason or empty string."""
         conn = self._get_conn()
@@ -367,8 +398,8 @@ class GroqTrader:
         swing_sl_pct = (atr_sl_swing / intel.current_price) * 100
 
         return f"""You are Aegis — an elite crypto scalper on Bitget futures.
-Take trades with 55%+ edge. Scalp (5-30 min holds), swing only on high-conviction.
-ACT when edge appears. Missing a good trade is worse than a small loss.
+Take trades only when the evidence supports a real edge. Scalp (5-30 min holds), swing only on high-conviction.
+Selectivity beats forced activity: never manufacture a trade to satisfy hunger.
 
 SCALPING PARAMETERS:
 - SL: {scalp_sl_pct:.3f}% ({atr_sl_scalp:.4f} — 1.2x ATR)
@@ -544,6 +575,13 @@ Respond in EXACTLY this JSON (no markdown, no code fences):
             decision["risk_percent"] = float(decision.get("risk_percent", 1.0))
             decision["symbol"] = symbol
             decision["session"] = session
+
+            # Adaptive quality gate: be more selective during a losing training
+            # curve, and require enough payoff to overcome scalp costs/noise.
+            gate_reason = self._quality_gate(decision, stats)
+            if gate_reason:
+                print(f"[GroqTrader] {symbol}: BLOCKED by quality gate — {gate_reason}")
+                return None
 
             # Validate SL makes sense
             sl_dist = abs(decision["entry"] - decision["stop_loss"])
