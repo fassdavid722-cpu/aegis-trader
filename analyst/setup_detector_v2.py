@@ -203,6 +203,11 @@ class SetupDetectorV2:
             take_profit_1   = entry - risk * 1.5
             take_profit_2   = entry - risk * 3.0
 
+        # Never emit a candidate with zero/negative risk.  This can happen
+        # when a zone boundary collapses onto the current ticker price.
+        if risk <= 0:
+            return None
+
         # ── Confidence + breakdown ───────────────────────────
         confidence_bd = ConfidenceEngine.calculate(
             direction=direction,

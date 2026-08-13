@@ -55,6 +55,24 @@ class PositionManager:
         if not signal.is_entry_signal():
             return None
 
+        # Reject malformed risk geometry before it can reach the journal or
+        # position monitor.  A zero/incorrectly-sided stop makes R-multiples
+        # undefined and can turn a small price move into an unbounded P&L.
+        if signal.entry is not None and signal.stop_loss is not None:
+            entry = float(signal.entry)
+            stop = float(signal.stop_loss)
+            tp = float(signal.take_profit) if signal.take_profit is not None else None
+            valid_stop = (signal.side == TradeSide.LONG and stop < entry) or \
+                         (signal.side == TradeSide.SHORT and stop > entry)
+            valid_tp = (tp is None) or \
+                       ((signal.side == TradeSide.LONG and tp > entry) or
+                        (signal.side == TradeSide.SHORT and tp < entry))
+            if entry <= 0 or not valid_stop or not valid_tp:
+                raise ValueError(
+                    f"Invalid risk levels for {signal.symbol}: "
+                    f"entry={entry}, stop_loss={stop}, take_profit={tp}, side={signal.side.value}"
+                )
+
         # Check for duplicate open position
         if signal.symbol in self._symbol_index:
             existing_id = self._symbol_index[signal.symbol]
